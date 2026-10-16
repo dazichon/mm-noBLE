@@ -26,9 +26,9 @@ public:
   uint8_t goalX = 7, goalY = 7;          // góc dưới trái của vùng đích
   uint8_t goalSize = 2;                  // 1: đích 1 ô, 2: đích 2x2
   uint16_t maxCells = 60;                // số ô đi tối đa (an toàn)
-  bool startSidesWall = true;
+  bool startSidesWall = true;            // ô xuất phát có tường trái/phải (quy ước micromouse)
   bool alignFront = true;                // trước mặt có tường -> căn khoảng cách tới tường (đúng tâm ô)
-  bool calibBack = true;                // sau lưng chắc chắn có tường -> lùi kịch tường calib lại tâm ô + gyro            // ô xuất phát có tường trái/phải (quy ước micromouse)
+  bool calibBack = true;                // sau lưng chắc chắn có tường -> lùi kịch tường calib lại tâm ô + gyro
 
   // Trạng thái
   int8_t x = 0, y = 0, h = 0;            // vị trí + hướng hiện tại của xe
@@ -36,11 +36,16 @@ public:
   uint8_t known[MAZE_SIZE][MAZE_SIZE];   // bit d = đã đọc được vách hướng d của ô
 
   void reset();                          // xoá bản đồ, đặt xe về (0,0) hướng Bắc
-  void explore();                        // CHẶN: dò tới đích (hoặc hết maxCells), vẽ bản đồ
+  // CHẶN: dò tới đích (hoặc hết maxCells), vẽ bản đồ.
+  // continuous = false: dừng ở từng ô (SEQ_MODE 8). true: chạy liên tục qua ô thẳng, chỉ dừng để quay (SEQ_MODE 10)
+  void explore(bool continuous = false);
+  float decideFrac = 0.80f;              // chạy liên tục: quyết định chạy tiếp/dừng khi đi được phần này của ô
 
   void setWall(int cx, int cy, int dir, bool wall, bool sure);
   bool hasWall(int cx, int cy, int dir) const;
   bool isKnown(int cx, int cy, int dir) const;
+  int chooseDir(int cx, int cy, int ch);
+  int runStraight(int maxRun);
   bool inGoal(int cx, int cy) const {
     return cx >= goalX && cx < goalX + goalSize && cy >= goalY && cy < goalY + goalSize;
   }

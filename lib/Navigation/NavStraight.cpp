@@ -16,6 +16,8 @@ void RobotNav::startPID() {
   // Đang chạy sẵn (vd. vừa cua xong) thì tăng tốc tiếp từ tốc độ hiện tại, đứng yên thì từ accelStartPwm
   _rampFrom = max(accelStartPwm, (currentLeftSpeed + currentRightSpeed) * 0.5f);
   _rampT0 = millis();
+  _yawIUs = 0;
+  if (currentLeftSpeed == 0 && currentRightSpeed == 0) _yawI = 0.0f;  // xuất phát từ đứng yên: xoá I; đang chạy liên tục: giữ I
   pidRunActive = true;
 }
 
@@ -39,6 +41,8 @@ void RobotNav::stepCell(int numCells) {
   stepTargetPulses = (long)numCells * pulsesPerCell;
   stepTraveledPulses = 0;
   sideNearL = sideFarL = sideNearR = sideFarR = 0;
+  frontNearN = frontFarN = 0;
+  _sideLastTF = _tF;
   _sideLastTL = _tL;
   _sideLastTR = _tR;
 
@@ -115,6 +119,14 @@ void RobotNav::updatePIDLoop() {
         if (_rawR >= 0 && _rawR < navSideWallMm) { if (sideNearR < 255) sideNearR++; }
         else if ((_rawR >= 0 || _rawR == -3) && sideFarR < 255) sideFarR++;
       }
+    }
+    // Tường TRƯỚC của ô đang đi vào: xe ở vị trí frac thì tường đó cách xa hơn lúc đứng tâm ô (1-frac) ô
+    // -> ngưỡng = navFrontWallMm + (1-frac)*cellMm. Tường của ô sau nữa xa thêm 1 ô nên vẫn nằm ngoài ngưỡng
+    if (frac >= frontWinFrom && frac <= frontWinTo && _tF != _sideLastTF) {
+      _sideLastTF = _tF;
+      float thr = navFrontWallMm + (1.0f - frac) * cellMm * frontMoveGain;
+      if (_rawF >= 0 && _rawF < thr) { if (frontNearN < 255) frontNearN++; }
+      else if ((_rawF >= 0 || _rawF == -3) && frontFarN < 255) frontFarN++;
     }
 
     // Đạt điều kiện dừng khi:
@@ -199,7 +211,16 @@ void RobotNav::updatePIDLoop() {
     if (useGyro) {
       float e = wrap180(_targetYaw + turnLeftYawSign * wallYawOff - mpu6050.getYaw());
       _lastYawErr = e;
-      yawCorr = constrain(-hold.yawKp * e, -yawMaxCorr, yawMaxCorr);
+      // Khâu I: 2 motor lệch lực theo tốc độ (chạy nhanh lâu thì P không đủ, xe vẫn trôi dần sang 1 bên)
+      unsigned long nowUs = micros();
+      float dt = _yawIUs ? (nowUs - _yawIUs) * 1e-6f : 0.0f;
+      _yawIUs = nowUs;
+      if (hold.yawKi > 0.0f && dt > 0.0f && dt < 0.1f) {
+        _yawI += e * dt;
+        float lim = hold.yawIMax / hold.yawKi;  // kẹp để phần I không vượt yawIMax PWM
+        _yawI = constrain(_yawI, -lim, lim);
+      }
+      yawCorr = constrain(-(hold.yawKp * e + hold.yawKi * _yawI), -yawMaxCorr, yawMaxCorr);
       pidOut += yawCorr;
     }
   }
@@ -249,7 +270,7 @@ void RobotNav::startHold(bool keepLog) {
   stepCell(hold.cells); // test: hold.cells ô x pulsesPerCell xung, PID liên tục rồi dừng
 }
 
-void RobotNav::driveCells(int cells, bool noStop) {
+void RobotNav::startCells(int cells, bool noStop) {
   if (cells <= 0) return;
   if (mpuReady && !_turnHeadingValid) { mpu6050.update(); _turnHeading = mpu6050.getYaw(); _turnHeadingValid = true; }
   uint8_t savedCells = hold.cells;
@@ -258,6 +279,11 @@ void RobotNav::driveCells(int cells, bool noStop) {
   hold.cells = savedCells;
   if (_turnHeadingValid) _targetYaw = _turnHeading; // bám hướng chuẩn: lỗi quay/cua trước không cộng dồn
   stepNoStop = noStop;
+}
+
+void RobotNav::driveCells(int cells, bool noStop) {
+  if (cells <= 0) return;
+  startCells(cells, noStop);
   unsigned long t0 = millis();
   while (pidRunActive && millis() - t0 < 15000UL * (unsigned long)cells) update();
   if (pidRunActive) stopPID();
@@ -271,6 +297,14 @@ WallState RobotNav::movingSideWall(bool left) const {
   if (nearN * 4 >= (nearN + farN) * 3) return WS_WALL;  // >= 75% mẫu gần
   if (farN * 4 >= (nearN + farN) * 3) return WS_OPEN;   // >= 75% mẫu xa
   return WS_UNKNOWN;                                  // lẫn lộn (thường do chạm cột góc)
+}
+
+WallState RobotNav::movingFrontWall() const {
+  uint8_t n = frontNearN + frontFarN;
+  if (n < 3) return WS_UNKNOWN;
+  if (frontNearN * 2 >= n) return WS_WALL;            // >= 50% mẫu gần: coi là có tường (an toàn, tránh lao vào tường)
+  if (frontFarN * 4 >= n * 3) return WS_OPEN;         // >= 75% mẫu xa mới coi là thông
+  return WS_UNKNOWN;
 }
 
 void RobotNav::settle(unsigned long ms) {

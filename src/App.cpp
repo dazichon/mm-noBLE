@@ -34,6 +34,7 @@ void applyParams() {
     n.encKp = ENC_STRAIGHT_KP;
     n.encMaxCorr = ENC_MAX_CORR;
     n.hold.yawKp = HOLD_YAW_KP;
+    n.hold.yawKi = HOLD_YAW_KI;
     n.hold.wallEnable = WALL_ENABLE;
     n.hold.wallKp = WALL_KP;
     n.hold.wallMaxCorr = WALL_MAX_CORR;
@@ -204,6 +205,10 @@ void runSeqMode() {
 #elif SEQ_MODE == 8
     robotNav.stopLeadPulses = STOP_LEAD_PULSES;
     mapper.explore();
+    robotNav.stopLeadPulses = 0;
+#elif SEQ_MODE == 10
+    robotNav.stopLeadPulses = STOP_LEAD_PULSES;
+    mapper.explore(true);  // chạy liên tục qua ô thẳng
     robotNav.stopLeadPulses = 0;
 #else
     robotNav.turnLeft90Test(TURN_RIGHT ? -TURN_ANGLE : TURN_ANGLE); // góc dương = trái, âm = phải

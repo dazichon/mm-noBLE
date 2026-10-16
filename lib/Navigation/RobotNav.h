@@ -21,6 +21,8 @@ struct WallStatus {
 struct HoldParams {
   float targetF = 97.0f;  // khoảng cách mong muốn tới tường trước (mm)
   float yawKp = 2.0f;      // độ mạnh giữ thẳng hướng bằng gyro (0 = tắt)
+  float yawKi = 0.0f;      // khâu I giữ hướng (PWM / (độ*s)), 0 = tắt
+  float yawIMax = 12.0f;   // giới hạn phần I (PWM)
   // Wall correction (thành phần nhỏ cộng vào correction tổng, chỉ P)
   bool wallEnable = false;
   float wallKp = 0.3f;        // PWM / mm sai lệch
@@ -187,6 +189,14 @@ public:
   float sideWinFrom = 0.35f, sideWinTo = 0.75f;
   uint8_t sideNearL = 0, sideFarL = 0, sideNearR = 0, sideFarR = 0;
   WallState movingSideWall(bool left) const;
+  // Tường TRƯỚC của ô đang đi vào, đọc khi đang chạy trong đoạn [frontWinFrom, frontWinTo] quãng đường ô
+  float frontWinFrom = 0.55f, frontWinTo = 0.78f;
+  float frontMoveGain = 0.5f;      // VL53 đọc xa bị nén (tường xa thêm 1 ô chỉ tăng ~70-100mm) -> chỉ cộng 1 phần quãng còn lại
+  float cellMm = 180.0f;           // chiều dài 1 ô (mm)
+  uint8_t frontNearN = 0, frontFarN = 0;
+  WallState movingFrontWall() const;
+  // Bắt đầu đi `cells` ô KHÔNG chặn (gọi update() trong vòng lặp tới khi pidRunActive = false)
+  void startCells(int cells = 1, bool noStop = false);
   // Đứng yên ms mili-giây, vẫn cập nhật gyro
   void settle(unsigned long ms);
 
@@ -228,6 +238,8 @@ public:
   float calibRevPwm = 60.0f;            // PWM khi lùi sát vách
   uint16_t calibRevMs = 100;            // ms: thời gian lùi (cố định), sau đó dừng, calib gyro về 0 độ rồi tiến calibFwdPulses
   long calibFwdPulses = 1500;           // xung: từ vách tới tâm ô (không tính vào quãng 1 ô tiếp theo)
+  long calibRevMinPulses = 1300;        // xung: phải lùi ít nhất chừng này mới được coi là chạm vách (chống dừng sớm)
+  uint16_t calibSquareMs = 120;         // ms: ép thêm vào vách sau khi chạm để lưng xe áp phẳng
   bool calibCellFromBackWall();
   // Căn khoảng cách tới tường TRƯỚC MẶT (xe đứng yên, có tường trước): tiến/lùi P theo VL53 trước tới frontAlignMm,
   // giữ hướng bằng gyro. Sửa sai số quãng đường dồn từ các ô trước (xung/ô, trôi khi phanh). CHẶN, tối đa frontAlignMaxMs
@@ -299,9 +311,11 @@ private:
   float _lastCorr = 0.0f; // hiệu chỉnh PID lần gần nhất (>0: giảm bánh trái, tăng bánh phải)
   unsigned long _holdFreeSince = 0;
   float _targetYaw;
+  float _yawI = 0.0f;
+  unsigned long _yawIUs = 0;
   float _rampFrom = 0.0f;
   unsigned long _rampT0 = 0;
-  unsigned long _sideLastTL = 0, _sideLastTR = 0;
+  unsigned long _sideLastTL = 0, _sideLastTR = 0, _sideLastTF = 0;
   unsigned long _lastPIDLoopTime;
   unsigned long _lastSensorReadTime;
   long _lastEncLeft;

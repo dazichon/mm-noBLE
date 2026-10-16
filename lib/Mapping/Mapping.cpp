@@ -89,7 +89,71 @@ String MazeMapper::draw() const {
 
 // ================= DÒ ĐƯỜNG =================
 
-void MazeMapper::explore() {
+// Hướng tới ô kề có step flood-fill nhỏ nhất (gọi sau floodfill_update). Hoà điểm thì ưu tiên đi thẳng. -1: bị kẹt
+int MazeMapper::chooseDir(int cx, int cy, int ch) {
+  int best = -1, bestStep = 65535;
+  for (int k = 0; k < 4; k++) {
+    int d = (ch + k) % 4;  // k = 0 trước tiên: hoà điểm thì đi thẳng
+    int nx = cx + DX[d], ny = cy + DY[d];
+    if (hasWall(cx, cy, d) || !inMaze(nx, ny)) continue;
+    if (maze.cell(nx, ny).step < bestStep) { bestStep = maze.cell(nx, ny).step; best = d; }
+  }
+  return best;
+}
+
+static const char *wsName(WallState w) { return w == WS_WALL ? "TUONG" : w == WS_OPEN ? "THONG" : "?"; }
+
+// Chạy LIÊN TỤC qua các ô thẳng (SEQ_MODE 10), không dừng ở từng ô.
+// Mỗi ô: khi đi được decideFrac quãng đường, lấy tường hông + tường trước của ô đang vào (đọc khi chạy),
+// flood-fill từ ô đó: vẫn đi thẳng được -> chạy tiếp không phanh; cần quay / tới đích / tường trước không chắc
+// -> giảm tốc, dừng ở tâm ô rồi trả về để vòng chính đứng yên đọc lại + quay. Trả về số ô đã đi.
+int MazeMapper::runStraight(int maxRun) {
+  int run = 0;
+  bool keepGoing = true;
+  String log;  // không in Serial khi đang chạy (USB chậm có thể chặn vòng PID) -> in sau khi dừng
+  char buf[200];
+  while (keepGoing && run < maxRun) {
+    setWall(x, y, h, false, true);  // sắp đi qua: chắc chắn thông
+    int nx = x + DX[h], ny = y + DY[h];
+    robotNav.startCells(1, true);
+    long decideAt = (long)(decideFrac * robotNav.pulsesPerCell);
+    bool decided = false;
+    keepGoing = false;
+    unsigned long t0 = millis();
+    while (robotNav.pidRunActive && millis() - t0 < 6000) {
+      robotNav.update();
+      if (decided || robotNav.stepTraveledPulses < decideAt) continue;
+      decided = true;
+      WallState sl = robotNav.movingSideWall(true), sr = robotNav.movingSideWall(false);
+      WallState fw = robotNav.movingFrontWall();
+      if (sl != WS_UNKNOWN) setWall(nx, ny, (h + 3) % 4, sl == WS_WALL, true);
+      if (sr != WS_UNKNOWN) setWall(nx, ny, (h + 1) % 4, sr == WS_WALL, true);
+      if (fw != WS_UNKNOWN) setWall(nx, ny, h, fw == WS_WALL, false);  // đứng yên đọc lại sẽ ghi đè
+      if (!inGoal(nx, ny) && fw == WS_OPEN && run + 1 < maxRun) {
+        maze.floodfill_update(goalX, goalY, false, false, goalSize);
+        keepGoing = (chooseDir(nx, ny, h) == h);
+      }
+      if (!keepGoing) robotNav.stepNoStop = false;  // giảm tốc bò + phanh ở tâm ô
+      snprintf(buf, sizeof(buf), ">> [RUN] O (%d,%d): TRAI=%s(%u/%u) PHAI=%s(%u/%u) TRUOC=%s(%u/%u) -> %s\n", nx, ny,
+               wsName(sl), robotNav.sideNearL, robotNav.sideFarL, wsName(sr), robotNav.sideNearR, robotNav.sideFarR,
+               wsName(fw), robotNav.frontNearN, robotNav.frontFarN, keepGoing ? "CHAY TIEP" : "DUNG");
+      log += buf;
+    }
+    if (robotNav.pidRunActive) robotNav.stopPID();
+    if (!decided) { phanh(); keepGoing = false; }  // không kịp quyết định (timeout): dừng cho an toàn
+    x = nx; y = ny;
+    maze.cell(x, y).run_visited = true;
+    run++;
+  }
+  robotNav.stepNoStop = false;
+  if (keepGoing) phanh();  // hết maxRun khi đang chạy
+  robotNav.settle(120);
+  Serial.print(log);
+  robotNav.navReport += log;
+  return run;
+}
+
+void MazeMapper::explore(bool continuous) {
   robotNav.navReport = "";
   robotNav.navReportPending = false;
   reset();
@@ -128,13 +192,7 @@ void MazeMapper::explore() {
     // 2. Flood-fill (tường chưa biết coi như thông) -> chọn hướng có bước nhỏ nhất, ưu tiên đi thẳng
     maze.floodfill_update(goalX, goalY, false, false, goalSize);
     if (maze.cell(x, y).step >= 65535) { endReason = "KHONG CON DUONG TOI DICH"; break; }
-    int best = -1, bestStep = 65535;
-    for (int k = 0; k < 4; k++) {
-      int d = (h + k) % 4;  // k = 0 trước tiên: hoà điểm thì đi thẳng
-      int nx = x + DX[d], ny = y + DY[d];
-      if (hasWall(x, y, d) || !inMaze(nx, ny)) continue;
-      if (maze.cell(nx, ny).step < bestStep) { bestStep = maze.cell(nx, ny).step; best = d; }
-    }
+    int best = chooseDir(x, y, h);
     if (best < 0) { endReason = "BI KET"; break; }
 
     // 3. Đi hoặc quay
@@ -142,7 +200,9 @@ void MazeMapper::explore() {
     robotNav.navPrintf(">> [MAP] O (%d,%d) huong %s -> %s\n", x, y, DIR_NAME[h],
                        rel == 0 ? "DI THANG" : rel == 1 ? "QUAY PHAI" : rel == 3 ? "QUAY TRAI" : "QUAY DAU");
     bool ok = true;
-    if (rel == 0) {
+    if (rel == 0 && continuous) {
+      cells += runStraight(maxCells - cells);
+    } else if (rel == 0) {
       diThang(1);
       setWall(x, y, h, false, true);  // vừa đi qua: chắc chắn thông
       x += DX[h]; y += DY[h];

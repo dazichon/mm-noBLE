@@ -246,10 +246,10 @@ bool RobotNav::calibCellFromBackWall() {
   long stallEnc = 0;
   unsigned long stallT = millis();
   while (millis() - t0 < calibRevMs) {
-    // Chạm vách: encoder gần như đứng yên 60ms (sau 150ms đầu) -> dừng ngay, không đẩy tiếp vào tường
+    // Chạm vách: đã lùi đủ calibRevMinPulses VÀ encoder đứng yên 100ms -> dừng (tránh dừng sớm khi xe mới nhích chậm)
     long encNow = labs(getLeftEncoder()) + labs(getRightEncoder());
     if (labs(encNow - stallEnc) > 6) { stallEnc = encNow; stallT = millis(); }
-    else if (millis() - t0 > 150 && millis() - stallT > 60) break;
+    else if (encNow / 2 >= calibRevMinPulses && millis() - stallT > 100) break;
     mpu6050.update();
     float e = target - mpu6050.getYaw();
     while (e > 180.0f) e -= 360.0f;
@@ -265,6 +265,14 @@ bool RobotNav::calibCellFromBackWall() {
     currentLeftSpeed = -pl;
     currentRightSpeed = -pr;
     delay(2);
+  }
+  // Ép thêm 2 bánh đều lực một chút cho lưng xe áp phẳng vào vách (không sửa hướng: vách tự nắn thẳng xe)
+  {
+    int p = constrain((int)lroundf(calibRevPwm), 0, 255);
+    analogWrite(M1_IN1, 0); analogWrite(M1_IN2, (int)(p * motorScaleL));
+    analogWrite(M2_IN1, 0); analogWrite(M2_IN2, (int)(p * motorScaleR));
+    unsigned long sq = millis();
+    while (millis() - sq < calibSquareMs) { mpu6050.update(); delay(2); }
   }
   stopMotors();
   long reversed = (labs(getLeftEncoder()) + labs(getRightEncoder())) / 2;
