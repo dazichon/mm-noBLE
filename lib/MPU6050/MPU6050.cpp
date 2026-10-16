@@ -82,24 +82,39 @@ void MPU6050::calibrate(int samples) {
     float sumZ = 0;
     int validSamples = 0;
     int16_t ax, ay, az, gx, gy, gz;
-    
+    int16_t minZ = 32767, maxZ = -32768;
+
     // Lưu ý: Khi hiệu chuẩn, robot phải đặt đứng yên hoàn toàn
     // Bỏ 30 mẫu đầu cho cảm biến ổn định rồi mới lấy trung bình
     for (int i = 0; i < samples + 30; i++) {
         if (readRawData(&ax, &ay, &az, &gx, &gy, &gz) && i >= 30) {
             sumZ += gz;
             validSamples++;
+            if (gz < minZ) minZ = gz;
+            if (gz > maxZ) maxZ = gz;
         }
         delay(3);
     }
-    
+
     // Tính toán độ lệch tĩnh (offset) cho trục Z với dải 2000 deg/s (16.4 LSB/(deg/s))
-    if (validSamples >= samples / 2) {
-        _gyroZOffset = (sumZ / validSamples) / 16.4f;
+    // Từ chối kết quả (giữ offset cũ) nếu xe KHÔNG đứng yên khi calib: mẫu dao động quá rộng,
+    // hoặc offset mới lệch quá xa offset cũ. Offset sai làm yaw trôi hàng chục độ/giây -> xe quay lung tung
+    String reason = "";
+    float newOffset = _gyroZOffset;
+    if (validSamples < samples / 2) {
+        reason = "THIEU MAU";
+    } else {
+        newOffset = (sumZ / validSamples) / 16.4f;
+        float range = (maxZ - minZ) / 16.4f;
+        if (range > 15.0f) reason = "XE DANG RUNG/QUAY (dao dong " + String(range, 1) + " do/s)";
+        else if (_calibrated && fabsf(newOffset - _gyroZOffset) > 3.0f)
+            reason = "LECH QUA XA OFFSET CU (" + String(newOffset, 3) + ")";
     }
+    if (reason.length() == 0) { _gyroZOffset = newOffset; _calibrated = true; }
     _stillTime = 0.0;
     String calMsg = ">> GYRO CALIB: " + String(validSamples) + "/" + String(samples) +
                     " mau hop le | offset Z = " + String(_gyroZOffset, 3) + " do/s";
+    if (reason.length() > 0) calMsg += " | BO KET QUA MOI: " + reason + " -> GIU OFFSET CU";
     Serial.println(calMsg);
     if (serialLink.isConnected()) {
         serialLink.println(calMsg);

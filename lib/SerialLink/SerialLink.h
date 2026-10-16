@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-// Thay thế BLEManager: toàn bộ log/telemetry in ra Serial, lệnh nhận từ Serial (kết thúc bằng '\n')
+// Toàn bộ log/telemetry in ra Serial, lệnh nhận từ Serial (kết thúc bằng '\n')
 class SerialLink {
 public:
     void begin(unsigned long baud = 115200);

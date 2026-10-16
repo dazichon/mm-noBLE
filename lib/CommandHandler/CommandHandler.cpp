@@ -1,4 +1,5 @@
 #include "CommandHandler.h"
+#include "Mapping.h"
 
 CommandHandler commandHandler;
 
@@ -43,6 +44,12 @@ void CommandHandler::processSerialCommands() {
     robotNav.stopMotors();
   } else if (cmd == "LOG") {
     robotNav.printLog();
+  } else if (cmd == "NAV" || cmd == "MAP") {
+    // In lại nhật ký dò đường + bản đồ lần chạy gần nhất (khi mở Serial monitor muộn)
+    Serial.println("==== NHAT KY ====");
+    Serial.print(robotNav.navReport);
+    Serial.println("==== BAN DO TUONG ====");
+    Serial.print(mapper.report);
   } else if (cmd == "HOLD") {
     robotNav.startHold();
     serialLink.println(">> [SERIAL] BAT CHE DO GIU VI TRI TRONG O (STOP de dung)");
@@ -103,6 +110,11 @@ void CommandHandler::processSerialCommands() {
     robotNav.startFloodFill(0);
   } else if (cmd == "FF_EXPLORE") {
     robotNav.startFloodFill(1);
+  } else if (cmd.startsWith("FF_CONT=")) {
+    // FF_CONT=1 -> đi liên tục, FF_CONT=0 -> đi từng ô
+    robotNav.ffContinuous = cmd.substring(8).toInt() != 0;
+    serialLink.println(String(">> [SERIAL] FLOOD-FILL TOI DICH: ") +
+                       (robotNav.ffContinuous ? "DI LIEN TUC" : "DI TUNG O"));
   } else if (cmd == "FF_OFF") {
     robotNav.stopFloodFill();
   } else if (cmd.startsWith("SET_GOAL=")) {

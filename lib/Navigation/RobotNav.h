@@ -29,11 +29,16 @@ struct HoldParams {
   float wallBaseR = 168.0f;   // VL53 phải khi xe ở giữa (mm)
   float wallValidMax = 250.0f; // đọc xa hơn mức này = không có tường (hở/ô kế tiếp) -> bỏ qua
   float wallErrClamp = 30.0f; // kẹp sai lệch (mm)
+  float wallYawGain = 0.15f;  // độ / mm: wall dịch hướng đích của gyro (0 = cộng PWM kiểu cũ)
+  float wallYawMax = 5.0f;    // độ: dịch hướng tối đa
   bool useFront = true;       // false: bỏ VL53 trước (không dùng để phanh)
   uint8_t cells = 5;       // số ô chạy trong bài test
 };
 
 enum CornerState : uint8_t { STRAIGHT, CORNER_LEFT, CORNER_RIGHT, EXIT_CORNER };
+
+// Trạng thái 1 bên tường khi đọc an toàn (SEQ_MODE 6): lỗi/không chắc KHÔNG được coi là "thông"
+enum WallState : uint8_t { WS_UNKNOWN, WS_OPEN, WS_WALL };
 
 class RobotNav {
 public:
@@ -47,7 +52,6 @@ public:
 
   void turnLeft(float angle = 90.0f);
   void turnRight(float angle = 90.0f);
-  void runTurnTest();
   void updatePIDLoop();
   void startPID();
   void stopPID();
@@ -55,11 +59,12 @@ public:
 
   // 4 Hàm Chuyển Động Nguyên Tử (Atomic Motion - Bước 3)
   // turn: 'F' thẳng, 'L' trái, 'R' phải, 'B' quay đầu (chỉ để báo cáo bản đồ)
-  WallStatus moveOneCell(char turn = 'F');
+  // cells > 1: chạy liên tục nhiều ô trong 1 lần PID, chỉ phanh ở ô cuối (vách hông/ghi bản đồ lấy ở ô cuối)
+  WallStatus moveOneCell(char turn = 'F', int cells = 1);
   void reportCell(char act, const WallStatus &w, const WallStatus *pre = nullptr, bool blocked = false);
-  WallStatus turnLeftAndStep();
-  WallStatus turnRightAndStep();
-  WallStatus turnAroundAndStep();
+  WallStatus turnLeftAndStep(int cells = 1);
+  WallStatus turnRightAndStep(int cells = 1);
+  WallStatus turnAroundAndStep(int cells = 1);
   WallStatus senseCurrentWalls();
 
   // Chế Độ 3: Bám Tường Tự Động (Autonomous Wall Follower)
@@ -70,6 +75,7 @@ public:
   // Cảm biến hông đặt xiên nên nhìn về PHÍA TRƯỚC ~1 ô: vách hông ô đích được lấy mẫu khi xe
   // đã chạy được sideSampleFrac (0..1) quãng đường của ô, không đọc lúc đã đứng ở tâm ô.
   float sideSampleFrac;
+  int lastMovedCells = 0; // số ô thực sự đi được ở lần moveOneCell gần nhất (0 nếu bị chặn)
   bool lastMoveBlocked; // bước gần nhất bị tường chặn sớm, xe vẫn ở ô cũ
   bool startCellFresh; // xe còn ở ô xuất phát (hướng Bắc, có tường trái/phải/sau), chưa đi ô nào
   WallStatus preWalls; // vách đọc trước khi bước (cảm biến nhìn trước 1 ô) = vách ô sắp vào
@@ -92,6 +98,11 @@ public:
   bool ffInGoal(int x, int y) const {
     return x >= ffGoal.x && x < ffGoal.x + ffGoalSize && y >= ffGoal.y && y < ffGoal.y + ffGoalSize;
   }
+  // Chế độ đi tới đích (ffMode 0): true = đi liên tục (gộp các ô thẳng đã biết vách thành 1 lần chạy, không dừng từng ô);
+  // false = dừng ở từng ô (cũ). Chế độ khám phá (ffMode 1) luôn đi từng ô.
+  bool ffContinuous = true;
+  uint8_t ffMaxRun = 16; // số ô tối đa gộp trong 1 lần chạy liên tục
+  int ffRunLength(Point first, int dir);
   void startFloodFill(uint8_t mode);
   void stopFloodFill(const char *reason = "ĐÃ DỪNG");
   void stepFloodFill();
@@ -118,9 +129,10 @@ public:
   float rightCompensation;
   uint8_t turnSpeed;
   uint8_t baseForwardSpeed;
+  float accelStartPwm = 60.0f;   // PWM lúc bắt đầu tăng tốc từ đứng yên
+  uint16_t accelRampMs = 400;    // ms để tăng từ accelStartPwm lên baseForwardSpeed (0 = tắt, đẩy hết tốc ngay)
   int currentLeftSpeed;
   int currentRightSpeed;
-  bool autoTestMode;
   bool pidRunActive;
 
   // Cấu hình đồng bộ bánh bằng Encoder (Cascaded Inner Loop)
@@ -159,7 +171,8 @@ public:
   void updateSensors();
 
   // Cân bằng 2 động cơ: hệ số nhân công suất, áp dụng chung cho MỌI tốc độ và mọi chế độ chạy
-  uint16_t brakeMs = 50; // thời gian hãm chủ động (ms) khi dừng
+  uint16_t brakeMs = 50; // thời gian hãm chủ động tối thiểu (ms) khi dừng
+  uint16_t brakeMaxMs = 250; // sau brakeMs vẫn giữ phanh cho tới khi 2 bánh đứng yên hẳn, tối đa chừng này (ms)
   float motorScaleL = 1.0f;
   float motorScaleR = 1.0f;
 
@@ -167,6 +180,15 @@ public:
   HoldParams hold;
   bool holdRun = false;   // true: chạy PID liên tục, tường trước <= frontStopDist thì đứng yên nhưng PID vẫn chạy
   void startHold(bool keepLog = false);
+  // Đi thẳng `cells` ô (CHẶN tới khi xong), bám hướng _turnHeading. noStop = true: hết quãng không phanh để vào cua
+  void driveCells(int cells = 1, bool noStop = false);
+  // Đọc vách hông KHI ĐANG CHẠY: trong lúc stepCell, mẫu VL53 trái/phải lấy ở đoạn [sideWinFrom, sideWinTo] quãng đường
+  // ô CUỐI được đếm (gần/xa so với navSideWallMm). Tia 45° lúc đó chiếu vào vách hông của ô đang đi vào.
+  float sideWinFrom = 0.35f, sideWinTo = 0.75f;
+  uint8_t sideNearL = 0, sideFarL = 0, sideNearR = 0, sideFarR = 0;
+  WallState movingSideWall(bool left) const;
+  // Đứng yên ms mili-giây, vẫn cập nhật gyro
+  void settle(unsigned long ms);
 
   // Log chạy lưu trong RAM (vòng 1000 mẫu / 50ms): in ra Serial khi cắm USB hoặc lệnh "LOG"
   // Test quay tại chỗ theo yaw MPU6050 (blocking). Log lưu RAM, in bằng printTurnLog()
@@ -207,7 +229,32 @@ public:
   uint16_t calibRevMs = 100;            // ms: thời gian lùi (cố định), sau đó dừng, calib gyro về 0 độ rồi tiến calibFwdPulses
   long calibFwdPulses = 1500;           // xung: từ vách tới tâm ô (không tính vào quãng 1 ô tiếp theo)
   bool calibCellFromBackWall();
+  // Căn khoảng cách tới tường TRƯỚC MẶT (xe đứng yên, có tường trước): tiến/lùi P theo VL53 trước tới frontAlignMm,
+  // giữ hướng bằng gyro. Sửa sai số quãng đường dồn từ các ô trước (xung/ô, trôi khi phanh). CHẶN, tối đa frontAlignMaxMs
+  float frontAlignMm = 120.0f;     // VL53 trước đọc bao nhiêu khi xe ở đúng tâm ô
+  float frontAlignTol = 4.0f;      // mm: sai số chấp nhận
+  float frontAlignSkip = 12.0f;    // mm: lệch ít hơn mức này thì không căn
+  float frontAlignKp = 1.0f;       // PWM / mm sai lệch
+  float frontAlignMinPwm = 45.0f;  // PWM nhỏ nhất (đủ thắng ma sát)
+  float frontAlignMaxPwm = 70.0f;  // PWM lớn nhất
+  uint16_t frontAlignMaxMs = 1500;
+  bool alignFrontWall();
   void runDeadEndTest();                // test: 1 ô -> dừng -> quay 180° -> calibCellFromBackWall()
+  // Test đọc 3 VL53L0X: ghi 100 mẫu (~30Hz) vào RAM, không chạy động cơ; in ra Serial khi cắm USB (printSensorLog)
+  // Tự đi từng ô (SEQ_MODE 6): trước thông -> đi thẳng; trước có tường -> trái thông thì trái, phải thông thì phải; cụt -> quay 180 + calib
+  uint16_t navSideWallMm = 220;         // mm: VL53 trái/phải đọc nhỏ hơn mức này = có tường
+  uint16_t navFrontWallMm = 200;        // mm: VL53 trước đọc nhỏ hơn mức này (xe đứng giữa ô) = có tường chắn phía trước
+  uint16_t navMaxSteps = 30;            // số ô tối đa (an toàn)
+  bool navStartSidesWall = true;        // ô xuất phát chưa có lần đọc nhìn-trước: true = coi như có tường trái/phải, false = không biết
+  String navReport;                     // nhật ký lần chạy chế độ 6 gần nhất (in lại khi cắm USB)
+  bool navReportPending = false;
+  void navPrintf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+  void senseWallsSafe(WallState &l, WallState &f, WallState &r);
+  void runCellNavTest();
+  void runSensorStreamTest();
+  String sensorReport;                  // thống kê thời gian đo thực tế của lần ghi gần nhất
+  bool sensorLogPending() const { return _sensorLogN > 0 && !_sensorLogPrinted; }
+  void printSensorLog();
   void runCellToCellTest();        // test: 1 ô -> dừng -> trái 90 -> 1 ô -> dừng -> phải 90 -> 1 ô -> dừng
   void runCornerNavTest();         // test: đi 1 ô -> cua trái (state machine) -> đi 1 ô -> dừng
   // Test calibration encoder: chạy thẳng 4 ô liên tục (seqCellPulses xung/ô), dừng rồi in ENC_L, ENC_R, AVG_TICKS, TICKS_PER_CELL
@@ -229,6 +276,11 @@ private:
   static const uint16_t LOG_SIZE = 1500;
   struct TurnRec { uint32_t t; float yaw, target, err; int16_t pl, pr; uint8_t st; }; // st: 0=TURN 1=CORNER 2=STRAIGHT
   static const uint16_t TURN_LOG_SIZE = 400;
+  struct SensorRec { uint32_t t; int16_t l, f, r; };
+  static const uint16_t SENSOR_LOG_SIZE = 100;
+  SensorRec _sensorLog[SENSOR_LOG_SIZE];
+  uint16_t _sensorLogN = 0;
+  bool _sensorLogPrinted = true;
   TurnRec _turnLog[TURN_LOG_SIZE];
   uint16_t _turnLogN = 0;
   bool _turnLogPrinted = true;
@@ -247,13 +299,15 @@ private:
   float _lastCorr = 0.0f; // hiệu chỉnh PID lần gần nhất (>0: giảm bánh trái, tăng bánh phải)
   unsigned long _holdFreeSince = 0;
   float _targetYaw;
+  float _rampFrom = 0.0f;
+  unsigned long _rampT0 = 0;
+  unsigned long _sideLastTL = 0, _sideLastTR = 0;
   unsigned long _lastPIDLoopTime;
   unsigned long _lastSensorReadTime;
   long _lastEncLeft;
   long _lastEncRight;
   long _startEncLeft;
   long _startEncRight;
-  float _smoothError;
 
   bool initVL53(VL53L0X &sensor, uint8_t xshutPin, uint8_t address,
                 const char *name);

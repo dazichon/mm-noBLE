@@ -33,6 +33,7 @@ private:
     float _yaw;
     float _yawSetpoint;
     bool _autoBias = true;
+    bool _calibrated = false; // đã có offset tốt (lần calib đầu)
     float _stillTime;   // thời gian liên tục gần như đứng yên (s)
     unsigned long _lastTime;
     
