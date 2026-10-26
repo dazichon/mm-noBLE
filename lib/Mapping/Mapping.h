@@ -39,6 +39,8 @@ public:
   // CHẶN: dò tới đích (hoặc hết maxCells), vẽ bản đồ.
   // continuous = false: dừng ở từng ô (SEQ_MODE 8). true: chạy liên tục qua ô thẳng, chỉ dừng để quay (SEQ_MODE 10)
   void explore(bool continuous = false);
+  void fullRun();                        // SEQ_MODE 11: dò tới đích -> dò về xuất phát -> speedrun
+  uint8_t speedrunSpeed = 0;             // PWM chạy thẳng khi speedrun (0 = giữ tốc độ thường)
   float decideFrac = 0.80f;              // chạy liên tục: quyết định chạy tiếp/dừng khi đi được phần này của ô
 
   void setWall(int cx, int cy, int dir, bool wall, bool sure);
@@ -46,6 +48,12 @@ public:
   bool isKnown(int cx, int cy, int dir) const;
   int chooseDir(int cx, int cy, int ch);
   int runStraight(int maxRun);
+  void begin();
+  const char *exploreTo(int tx, int ty, int ts, bool continuous, uint16_t &cells);
+  void finish(const char *reason, uint16_t cells);
+  bool speedRun();
+  int8_t tX = 0, tY = 0, tS = 1;         // vùng đích của lượt dò hiện tại
+  bool inTarget(int cx, int cy) const { return cx >= tX && cx < tX + tS && cy >= tY && cy < tY + tS; }
   bool inGoal(int cx, int cy) const {
     return cx >= goalX && cx < goalX + goalSize && cy >= goalY && cy < goalY + goalSize;
   }

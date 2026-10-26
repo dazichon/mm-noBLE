@@ -183,7 +183,7 @@ void RobotNav::navPrintf(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   Serial.print(buf);
-  if (navReport.length() < 8000) navReport += buf;
+  if (navReport.length() < 24000) navReport += buf;
 }
 
 // Trung vị n mẫu (n >= 1) để in ra cho dễ chỉnh ngưỡng; không dùng để quyết định
@@ -315,9 +315,9 @@ void RobotNav::runCellNavTest() {
   navReportPending = !(bool)Serial; // chạy rời USB: lưu nhật ký, main in ra khi cắm USB
 }
 
-// ================= TEST ĐỌC 3 VL53L0X: ghi 100 mẫu vào RAM, in khi cắm USB. KHÔNG chạy động cơ =================
-// Dùng lại pollSensor() có sẵn (đọc không chặn), không lọc, không hiệu chuẩn. Mục tiêu 30Hz (33.3ms/mẫu).
-// Trong lúc ghi không in gì. Đo thực tế: thời gian đọc I2C 3 cảm biến và khoảng giữa 2 mẫu MỚI của từng cảm biến.
+// ================= TEST ĐỌC 3 VL53L0X LIÊN TỤC (SEQ_MODE 5). KHÔNG chạy động cơ =================
+// In ra Serial liên tục ~10 lần/giây: L, F, R (mm) + trạng thái. Bấm nút BUTTON lần nữa để dừng.
+// Cắm USB + mở Serial monitor trước khi bấm nút.
 
 static const char *vlStatus(int16_t raw) {
   if (raw >= 0) return "OK";
@@ -327,6 +327,39 @@ static const char *vlStatus(int16_t raw) {
 }
 
 void RobotNav::runSensorStreamTest() {
+  stopMotors();
+  Serial.println("==== DOC VL53L0X LIEN TUC: L_MM F_MM R_MM (-1 = loi/ngoai tam). BAM NUT DE DUNG ====");
+  Serial.printf("init: L=%s F=%s R=%s\n", leftReady ? "OK" : "LOI", frontReady ? "OK" : "LOI", rightReady ? "OK" : "LOI");
+  while (digitalRead(BUTTON) == LOW) delay(10);  // chờ nhả nút
+  unsigned long lastPrint = 0;
+  uint8_t stL = 0, stF = 0, stR = 0;
+  // In cả số đo THÔ (không lọc theo mã trạng thái) để so sánh: [st=mã] 11 = hợp lệ
+  bool savedCheck = vl53CheckStatus;
+  vl53CheckStatus = false;
+  Serial.println("Cot: so do tho [st = ma trang thai, 11 = hop le, khac 11 = do sai -> robot se coi la ngoai tam]");
+  while (true) {
+    unsigned long now = millis();
+    pollSensor(sensorLeft, leftReady, _rawL, _tL, now, &stL);
+    pollSensor(sensorFront, frontReady, _rawF, _tF, now, &stF);
+    pollSensor(sensorRight, rightReady, _rawR, _tR, now, &stR);
+    if (now - lastPrint >= 100) {
+      lastPrint = now;
+      Serial.printf("L=%4d [st=%2u]   F=%4d [st=%2u]   R=%4d [st=%2u]\n", _rawL >= 0 ? _rawL : -1, stL,
+                    _rawF >= 0 ? _rawF : -1, stF, _rawR >= 0 ? _rawR : -1, stR);
+    }
+    if (digitalRead(BUTTON) == LOW) {  // bấm nút: dừng
+      delay(30);
+      if (digitalRead(BUTTON) == LOW) break;
+    }
+    delay(2);
+  }
+  while (digitalRead(BUTTON) == LOW) delay(10);
+  vl53CheckStatus = savedCheck;
+  Serial.println("==== DUNG DOC CAM BIEN ====");
+}
+
+// Bản cũ: ghi 100 mẫu vào RAM rồi in khi cắm USB (không còn dùng)
+void RobotNav::runSensorStreamTestRecord() {
   const unsigned long PERIOD_US = 33333; // 30 Hz
   unsigned long lastNew[3] = {_tL, _tF, _tR};
   unsigned long ivN[3] = {0, 0, 0}, ivSum[3] = {0, 0, 0}, ivMin[3] = {0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL}, ivMax[3] = {0, 0, 0};

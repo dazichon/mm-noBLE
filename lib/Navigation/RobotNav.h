@@ -123,7 +123,10 @@ public:
   long stepStartR;
   long stepTargetPulses;
   long stepTraveledPulses;
+  long stepCarry = 0;     // xung đã đi sẵn của ô hiện tại (chuyển từ ô trước khi chạy liên tục)
+  bool _carryValid = false;
   long stopLeadPulses = 0; // xung: phanh sớm chừng này trước đích để bù quãng trôi sau phanh (0 = tắt)
+  float stopLeadRefPwm = 150.0f; // tốc độ (PWM) lúc đo stopLeadPulses
   unsigned long stepStartTime;
 
   // Các biến thông số có thể điều chỉnh
@@ -264,6 +267,7 @@ public:
   void senseWallsSafe(WallState &l, WallState &f, WallState &r);
   void runCellNavTest();
   void runSensorStreamTest();
+  void runSensorStreamTestRecord();
   String sensorReport;                  // thống kê thời gian đo thực tế của lần ghi gần nhất
   bool sensorLogPending() const { return _sensorLogN > 0 && !_sensorLogPrinted; }
   void printSensorLog();

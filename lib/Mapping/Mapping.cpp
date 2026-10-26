@@ -129,8 +129,8 @@ int MazeMapper::runStraight(int maxRun) {
       if (sl != WS_UNKNOWN) setWall(nx, ny, (h + 3) % 4, sl == WS_WALL, true);
       if (sr != WS_UNKNOWN) setWall(nx, ny, (h + 1) % 4, sr == WS_WALL, true);
       if (fw != WS_UNKNOWN) setWall(nx, ny, h, fw == WS_WALL, false);  // đứng yên đọc lại sẽ ghi đè
-      if (!inGoal(nx, ny) && fw == WS_OPEN && run + 1 < maxRun) {
-        maze.floodfill_update(goalX, goalY, false, false, goalSize);
+      if (!inTarget(nx, ny) && fw == WS_OPEN && run + 1 < maxRun) {
+        maze.floodfill_update(tX, tY, false, false, tS);
         keepGoing = (chooseDir(nx, ny, h) == h);
       }
       if (!keepGoing) robotNav.stepNoStop = false;  // giảm tốc bò + phanh ở tâm ô
@@ -153,7 +153,7 @@ int MazeMapper::runStraight(int maxRun) {
   return run;
 }
 
-void MazeMapper::explore(bool continuous) {
+void MazeMapper::begin() {
   robotNav.navReport = "";
   robotNav.navReportPending = false;
   reset();
@@ -164,12 +164,17 @@ void MazeMapper::explore(bool continuous) {
   if (startSidesWall) { setWall(x, y, (h + 3) % 4, true, true); setWall(x, y, (h + 1) % 4, true, true); }
 
   robotNav.navPrintf(">> [MAP] BAT DAU | me cung %ux%u | dich (%u,%u) %ux%u\n", cols, rows, goalX, goalY, goalSize, goalSize);
+}
 
+// Dò đường tới vùng đích (tx,ty) kích thước ts: vòng chính đứng yên đọc tường / quay / đi (continuous: chạy liên tục).
+// Trả về lý do kết thúc ("TOI DICH" là thành công). cells: số ô đã đi trong lượt này
+const char *MazeMapper::exploreTo(int tx, int ty, int ts, bool continuous, uint16_t &cells) {
+  tX = tx; tY = ty; tS = ts;
   const char *endReason = "HET SO O TOI DA";
-  uint16_t cells = 0;
+  cells = 0;
   bool calibDone = false;
   for (uint16_t loop = 0; loop < maxCells * 4 + 8 && cells < maxCells; loop++) {
-    if (inGoal(x, y)) { endReason = "TOI DICH"; break; }
+    if (inTarget(x, y)) { endReason = "TOI DICH"; break; }
 
     // 0. Biết CHẮC sau lưng có tường -> lùi kịch tường, calib gyro, tiến lại tâm ô (mỗi tư thế x,y,h chỉ 1 lần)
     int back = (h + 2) % 4;
@@ -190,7 +195,7 @@ void MazeMapper::explore(bool continuous) {
     if (Serial) Serial.print(draw());
 
     // 2. Flood-fill (tường chưa biết coi như thông) -> chọn hướng có bước nhỏ nhất, ưu tiên đi thẳng
-    maze.floodfill_update(goalX, goalY, false, false, goalSize);
+    maze.floodfill_update(tX, tY, false, false, tS);
     if (maze.cell(x, y).step >= 65535) { endReason = "KHONG CON DUONG TOI DICH"; break; }
     int best = chooseDir(x, y, h);
     if (best < 0) { endReason = "BI KET"; break; }
@@ -226,10 +231,101 @@ void MazeMapper::explore(bool continuous) {
     if (!ok) { endReason = "QUAY LOI"; break; }
   }
 
+  return endReason;
+}
+
+void MazeMapper::finish(const char *reason, uint16_t cells) {
   phanh();
   report = draw();
-  robotNav.navPrintf(">> [MAP] KET THUC: %s | o (%d,%d) | da di %u o\n", endReason, x, y, cells);
+  robotNav.navPrintf(">> [MAP] KET THUC: %s | o (%d,%d) | da di %u o\n", reason, x, y, cells);
   if (Serial) Serial.print(report);
   reportPending = !(bool)Serial;  // chạy rời USB: in khi cắm lại
   robotNav.navReportPending = !(bool)Serial;
+}
+
+void MazeMapper::explore(bool continuous) {
+  begin();
+  uint16_t cells = 0;
+  const char *r = exploreTo(goalX, goalY, goalSize, continuous, cells);
+  finish(r, cells);
+}
+
+// SEQ_MODE 11: dò tới đích -> dò ngược về ô xuất phát (khám phá thêm đường) -> speedrun đường ngắn nhất tới đích
+void MazeMapper::fullRun() {
+  begin();
+  uint16_t c1 = 0, c2 = 0;
+  const char *r = exploreTo(goalX, goalY, goalSize, true, c1);
+  robotNav.navPrintf(">> [MAP] LUOT 1 (TOI DICH): %s | %u o\n", r, c1);
+  if (strcmp(r, "TOI DICH") != 0) { finish(r, c1); return; }
+  cho(300);
+  r = exploreTo(0, 0, 1, true, c2);
+  robotNav.navPrintf(">> [MAP] LUOT 2 (VE XUAT PHAT): %s | %u o\n", r, c2);
+  if (strcmp(r, "TOI DICH") != 0) { finish(r, c1 + c2); return; }
+  if (Serial) Serial.print(draw());
+  cho(500);
+  r = speedRun() ? "SPEEDRUN TOI DICH" : "SPEEDRUN LOI";
+  finish(r, c1 + c2);
+}
+
+// ================= SPEEDRUN =================
+
+// Chỉ đi qua tường ĐÃ BIẾT: tường chưa đọc coi như CÓ tường (an toàn). Gộp các ô thẳng thành 1 lần chạy liên tục,
+// quay tại chỗ ở chỗ rẽ. Không đọc / vẽ tường nữa.
+bool MazeMapper::speedRun() {
+  static ParentMaze km;
+  km.clear_mem();
+  for (int cx = 0; cx < MAZE_SIZE; cx++)
+    for (int cy = 0; cy < MAZE_SIZE; cy++)
+      for (int d = 0; d < 4; d++)
+        wallRef(km.cell(cx, cy), d) = !isKnown(cx, cy, d) || hasWall(cx, cy, d);
+  km.floodfill_update(goalX, goalY, false, false, goalSize);
+  if (km.cell(x, y).step >= 65535) {
+    robotNav.navPrintf(">> [SPEED] KHONG CO DUONG DA BIET TOI DICH\n");
+    return false;
+  }
+
+  // Lần theo step giảm dần -> danh sách hướng
+  uint8_t path[MAZE_SIZE * MAZE_SIZE];
+  int n = 0, cx = x, cy = y, ch = h;
+  while (!inGoal(cx, cy) && n < MAZE_SIZE * MAZE_SIZE) {
+    int best = -1, bestStep = km.cell(cx, cy).step;
+    for (int k = 0; k < 4; k++) {
+      int d = (ch + k) % 4;  // hoà điểm thì ưu tiên giữ hướng (ít phải quay)
+      int nx = cx + DX[d], ny = cy + DY[d];
+      if (wallRef(km.cell(cx, cy), d) || !inMaze(nx, ny)) continue;
+      if (km.cell(nx, ny).step < bestStep) { bestStep = km.cell(nx, ny).step; best = d; }
+    }
+    if (best < 0) return false;
+    path[n++] = best;
+    cx += DX[best]; cy += DY[best]; ch = best;
+  }
+  String s = ">> [SPEED] DUONG " + String(n) + " O: ";
+  for (int i = 0; i < n; i++) s += "NESW"[path[i]];
+  robotNav.navPrintf("%s\n", s.c_str());
+
+  uint8_t savedSpeed = robotNav.baseForwardSpeed;
+  if (speedrunSpeed > 0) robotNav.baseForwardSpeed = speedrunSpeed;
+  bool ok = true;
+  for (int i = 0; i < n && ok;) {
+    int d = path[i];
+    int rel = (d - h + 4) % 4;
+    // Trước khi quay: có tường trước (đã biết) thì căn khoảng cách cho đúng tâm ô
+    if (rel != 0 && alignFront && isKnown(x, y, h) && hasWall(x, y, h)) canTuongTruoc();
+    if (rel == 1) ok = quayPhai();
+    else if (rel == 3) ok = quayTrai();
+    else if (rel == 2) ok = quayDau();
+    h = d;
+    // Sau khi quay (và ở ô xuất phát): sau lưng có tường đã biết -> lùi kịch tường, calib tâm ô + gyro như lúc dò
+    int back = (h + 2) % 4;
+    if (ok && calibBack && (rel != 0 || i == 0) && isKnown(x, y, back) && hasWall(x, y, back)) {
+      robotNav.navPrintf(">> [SPEED] O (%d,%d): LUI CALIB\n", x, y);
+      ok = calibNgoCut();
+    }
+    int run = 0;
+    while (i < n && path[i] == d) { run++; i++; }
+    diThang(run);  // gộp cả đoạn thẳng: chạy liên tục, chỉ phanh ở ô cuối
+    x += DX[d] * run; y += DY[d] * run;
+  }
+  robotNav.baseForwardSpeed = savedSpeed;
+  return ok && inGoal(x, y);
 }

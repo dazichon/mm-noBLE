@@ -10,8 +10,12 @@
 
 void applyParams() {
     RobotNav &n = robotNav;
+    // VL53 trước: bỏ phản xạ yếu (mặt sàn / mép khung trong hình nón nhìn) -> không còn báo tường giả ~85mm
+    if (n.frontReady && VL53_FRONT_SIGNAL_LIMIT > 0.0f) n.sensorFront.setSignalRateLimit(VL53_FRONT_SIGNAL_LIMIT);
     n.motorScaleL = 1.0f + MOTOR_TRIM_LEFT / 100.0f;
     n.motorScaleR = 1.0f + MOTOR_TRIM_RIGHT / 100.0f;
+    if (FORWARD_PWM > 0) n.baseForwardSpeed = FORWARD_PWM;
+    n.stopLeadRefPwm = STOP_LEAD_REF_PWM;
     n.accelStartPwm = ACCEL_START_PWM;
     n.accelRampMs = ACCEL_RAMP_MS;
 
@@ -69,6 +73,7 @@ void applyParams() {
     mapper.goalY = MAP_GOAL_Y;
     mapper.goalSize = MAP_GOAL_SIZE;
     mapper.maxCells = MAP_MAX_CELLS;
+    mapper.speedrunSpeed = MAP_SPEEDRUN_PWM;
     mapper.calibBack = MAP_CALIB_BACK;
     mapper.alignFront = MAP_ALIGN_FRONT;
     n.frontAlignMm = FRONT_ALIGN_MM;
@@ -209,6 +214,10 @@ void runSeqMode() {
 #elif SEQ_MODE == 10
     robotNav.stopLeadPulses = STOP_LEAD_PULSES;
     mapper.explore(true);  // chạy liên tục qua ô thẳng
+    robotNav.stopLeadPulses = 0;
+#elif SEQ_MODE == 11
+    robotNav.stopLeadPulses = STOP_LEAD_PULSES;
+    mapper.fullRun();  // dò tới đích -> dò về xuất phát -> speedrun
     robotNav.stopLeadPulses = 0;
 #else
     robotNav.turnLeft90Test(TURN_RIGHT ? -TURN_ANGLE : TURN_ANGLE); // góc dương = trái, âm = phải

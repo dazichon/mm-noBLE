@@ -3,14 +3,21 @@
 #include "NavInternal.h"
 
 // Trả về khoảng cách (mm) hoặc 999 nếu lỗi; cập nhật raw = -1 khi lỗi/timeout, không chặn vòng lặp
+bool vl53CheckStatus = true;
+
 uint16_t pollSensor(VL53L0X &sensor, bool ready, int16_t &raw,
-                           unsigned long &lastNew, unsigned long now) {
+                           unsigned long &lastNew, unsigned long now, uint8_t *statusOut) {
   if (!ready) { raw = -1; return 999; }  // -1: init thất bại
   if (sensor.readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) {
+    // Mã trạng thái phép đo (bit 6..3): 11 = hợp lệ. Mã khác = tín hiệu yếu / nhiễu / không thấy vật
+    // -> chip vẫn trả 1 con số rác (vd ~85mm khi phía trước trống) nên KHÔNG được dùng
+    uint8_t st = (sensor.readReg(VL53L0X::RESULT_RANGE_STATUS) & 0x78) >> 3;
     uint16_t r = sensor.readReg16Bit(VL53L0X::RESULT_RANGE_STATUS + 10);
     sensor.writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 0x01);
     lastNew = now;
-    raw = (r > 1200) ? -3 : (r < 15 ? 15 : (int16_t)r);  // -3: ngoài tầm đo; quá gần thì kẹp về 15 (tường sát cảm biến)
+    if (statusOut) *statusOut = st;
+    if (vl53CheckStatus && st != 11) raw = -3;  // đo không hợp lệ = coi như không thấy gì (ngoài tầm)
+    else raw = (r > 1200) ? -3 : (r < 15 ? 15 : (int16_t)r);  // -3: ngoài tầm đo; quá gần thì kẹp về 15 (tường sát cảm biến)
   } else if (now - lastNew > 200) {
     raw = -2;  // lâu không có mẫu mới => timeout
   }

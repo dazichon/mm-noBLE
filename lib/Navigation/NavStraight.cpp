@@ -22,6 +22,8 @@ void RobotNav::startPID() {
 }
 
 void RobotNav::stopPID() {
+  _carryValid = false;
+  stepCarry = 0;
   if (mpuReady) mpu6050.setAutoBias(true);
   holdRun = false;
   pidRunActive = false;
@@ -102,7 +104,7 @@ void RobotNav::updatePIDLoop() {
     long curR = getRightEncoder();
     long distL = labs(curL - stepStartL);
     long distR = labs(curR - stepStartR);
-    long distTraveled = (distL + distR) / 2;
+    long distTraveled = (distL + distR) / 2 + stepCarry;  // stepCarry: quãng vượt của ô trước khi chạy liên tục
     stepTraveledPulses = distTraveled;
 
     // Đếm mẫu vách hông trong cửa sổ của ô cuối (-3 = ngoài tầm = thông; -1/-2 = lỗi, bỏ qua)
@@ -132,10 +134,15 @@ void RobotNav::updatePIDLoop() {
     // Đạt điều kiện dừng khi:
     // a) Quãng đường trung bình 2 bánh đạt đủ targetPulses (loại bỏ trường hợp 1 bánh quay nhanh khi bẻ lái làm dừng sớm)
     // b) HOẶC timeout an toàn 4.5 giây phòng ngừa xe chạy vô tận
-    bool pulseReached = (distTraveled >= stepTargetPulses - stopLeadPulses); // phanh sớm stopLeadPulses để bù quãng trôi sau phanh
+    // Chạy liên tục (stepNoStop): KHÔNG phanh sớm, đi đủ quãng (phần vượt chuyển sang ô sau qua stepCarry)
+    // Quãng trôi sau phanh tăng theo bình phương tốc độ: stopLeadPulses đo ở stopLeadRefPwm, chạy nhanh hơn thì phanh sớm hơn
+    float sk = (float)baseForwardSpeed / stopLeadRefPwm;
+    long lead = stepNoStop ? 0 : (long)(stopLeadPulses * sk * sk);
+    bool pulseReached = (distTraveled >= stepTargetPulses - lead); // phanh sớm stopLeadPulses để bù quãng trôi sau phanh
     bool timeoutSafe = (millis() - stepStartTime > 4500UL * (unsigned long)max(1L, stepTargetPulses / pulsesPerCell));
 
     if ((pulseReached || timeoutSafe) && stepNoStop) {
+      _carryValid = pulseReached;  // ô sau đếm tiếp phần đã vượt (kể cả quãng chạy trong lúc chuyển ô)
       // Hết quãng đường nhưng giữ nguyên PWM hiện tại để vào corner đang chạy (không phanh, không stopMotors)
       stepNoStop = false;
       stepCellActive = false;
@@ -265,9 +272,17 @@ void RobotNav::startHold(bool keepLog) {
   holdRun = true;
   _holdStopped = false;
   if (!keepLog) clearLog();
+  // Ô trước vừa chạy liên tục qua (không phanh): phần xung đã đi quá đích được tính vào ô này, không bị mất khi reset encoder
+  long carry = 0;
+  if (_carryValid) {
+    long travel = (labs(getLeftEncoder() - stepStartL) + labs(getRightEncoder() - stepStartR)) / 2 + stepCarry;
+    carry = constrain(travel - stepTargetPulses, 0L, pulsesPerCell / 2);
+  }
+  _carryValid = false;
   resetEnc();
   frontStopDist = (uint16_t)hold.targetF;
-  stepCell(hold.cells); // test: hold.cells ô x pulsesPerCell xung, PID liên tục rồi dừng
+  stepCell(hold.cells);
+  stepCarry = carry;
 }
 
 void RobotNav::startCells(int cells, bool noStop) {
