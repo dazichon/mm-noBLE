@@ -110,6 +110,11 @@ void RobotNav::init() {
   resetEnc();
   Serial.println("ENCODERS INITIALIZED");
 
+  initI2CSensors();
+}
+
+// Khởi tạo bus I2C + 3 VL53L0X + MPU6050 (calib gyro: xe phải đứng yên). Dùng lúc bật nguồn và khi khôi phục lỗi bus
+bool RobotNav::initI2CSensors() {
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(100);
 
@@ -139,6 +144,56 @@ void RobotNav::init() {
   } else {
     Serial.println("MPU6050 NOT FOUND @ 0x68");
   }
+  _i2cBadCycles = 0;
+  return leftReady && frontReady && rightReady && mpuReady;
+}
+
+// Gọi sau mỗi lần đọc cảm biến: VL53 nào đang dùng mà giao tiếp lỗi (last_status != 0) hoặc MPU đọc lỗi liên tiếp
+// -> đếm; lỗi liên tục ~5 chu kỳ (~175ms) thì coi là hỏng bus
+void RobotNav::checkI2CFault() {
+  if (i2cFault) return;
+  bool bad = (leftReady && sensorLeft.last_status != 0) || (frontReady && sensorFront.last_status != 0) ||
+             (rightReady && sensorRight.last_status != 0);
+  if (bad) { if (_i2cBadCycles < 255) _i2cBadCycles++; }
+  else _i2cBadCycles = 0;
+  if (_i2cBadCycles >= 5) enterI2CFault("VL53 khong tra loi");
+  else if (mpuReady && mpu6050.readFails() >= 50) enterI2CFault("MPU6050 khong tra loi");
+}
+
+void RobotNav::enterI2CFault(const char *why) {
+  i2cFault = true;
+  stopPID();  // dừng motor + huỷ chạy thẳng
+  cornerState = STRAIGHT;
+  ffActive = false;
+  // Ngừng đọc mọi cảm biến I2C: hết in lỗi liên tục, các vòng chạy thấy cảm biến không sẵn sàng thì thoát
+  leftReady = frontReady = rightReady = false;
+  mpuReady = false;
+  _i2cRetryT = millis();
+  navPrintf(">> [I2C] LOI BUS I2C (%s) -> DUNG XE, HUY LUOT CHAY. Kiem tra nguon pin / day cam bien\n", why);
+  navReportPending = !(bool)Serial;
+}
+
+// Xe đứng yên: khởi động lại bus I2C và các cảm biến. Thành công thì xoá lỗi (bấm nút để chạy lại)
+bool RobotNav::recoverI2C() {
+  if (!i2cFault || pidRunActive) return false;
+  if (millis() - _i2cRetryT < i2cRetryMs) return false;
+  _i2cRetryT = millis();
+  stopMotors();
+  Serial.println(">> [I2C] THU KHOI DONG LAI BUS I2C...");
+  Wire.end();
+  delay(50);
+  bool ok = initI2CSensors();
+  if (ok) {
+    i2cFault = false;
+    if (frontSignalLimit > 0.0f) sensorFront.setSignalRateLimit(frontSignalLimit);  // khởi tạo lại làm mất cấu hình này
+    Serial.println(">> [I2C] KHOI PHUC XONG, BAM NUT DE CHAY LAI");
+  } else {
+    leftReady = frontReady = rightReady = false;
+    mpuReady = false;
+    _i2cBadCycles = 0;
+    Serial.println(">> [I2C] CHUA KHOI PHUC DUOC, SE THU LAI");
+  }
+  return ok;
 }
 
 void RobotNav::saveForwardSpeed() {
@@ -174,11 +229,7 @@ void RobotNav::stopMotors() {
   analogWrite(M1_IN1, 0);
   analogWrite(M1_IN2, 0);
   analogWrite(M2_IN1, 0);
-  analogWrite(M2_IN2, 0);
-  digitalWrite(M1_IN1, LOW);
-  digitalWrite(M1_IN2, LOW);
-  digitalWrite(M2_IN1, LOW);
-  digitalWrite(M2_IN2, LOW);
+  analogWrite(M2_IN2, 0);  // chân motor đang ở chế độ PWM: digitalWrite() sẽ báo lỗi "not set as GPIO", analogWrite 0 là đủ
 }
 
 void RobotNav::brakeMotors() {
@@ -203,6 +254,7 @@ void RobotNav::brakeMotors() {
 
 
 void RobotNav::update() {
+  if (i2cFault) { stopMotors(); return; }
   updateSensors();
 
   if (cornerState != STRAIGHT) {

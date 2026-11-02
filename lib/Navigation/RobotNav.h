@@ -174,6 +174,15 @@ public:
   float smoothDR;
 
   void updateSensors();
+  // LỖI BUS I2C (VL53 + MPU6050 không trả lời, thường do sụt nguồn): dừng motor, huỷ lượt chạy, ngừng đọc cảm biến
+  // (hết in lỗi liên tục). Vòng loop() thử khởi động lại bus mỗi i2cRetryMs khi xe đứng yên
+  bool i2cFault = false;
+  uint16_t i2cRetryMs = 3000;
+  float frontSignalLimit = 0.0f;   // VL53_FRONT_SIGNAL_LIMIT, gán lại sau khi khôi phục bus
+  void checkI2CFault();
+  void enterI2CFault(const char *why);
+  bool recoverI2C();
+  bool initI2CSensors();
 
   // Cân bằng 2 động cơ: hệ số nhân công suất, áp dụng chung cho MỌI tốc độ và mọi chế độ chạy
   uint16_t brakeMs = 50; // thời gian hãm chủ động tối thiểu (ms) khi dừng
@@ -190,6 +199,13 @@ public:
   // Đọc vách hông KHI ĐANG CHẠY: trong lúc stepCell, mẫu VL53 trái/phải lấy ở đoạn [sideWinFrom, sideWinTo] quãng đường
   // ô CUỐI được đếm (gần/xa so với navSideWallMm). Tia 45° lúc đó chiếu vào vách hông của ô đang đi vào.
   float sideWinFrom = 0.35f, sideWinTo = 0.75f;
+  // Bỏ mẫu vách hông khi tia chéo đang chiếu vào tường TRƯỚC (số đo ~ sideEchoRatio x VL53 trước, khi VL53 trước <= sideEchoFrontMax)
+  bool sideEchoEnable = true;
+  float sideEchoFrontMax = 260.0f;
+  float sideEchoRatio = 1.3f;
+  float sideEchoTol = 25.0f;
+  uint8_t sideEchoL = 0, sideEchoR = 0;  // số mẫu đã bỏ trong ô vừa đi (log)
+  bool sideIsFrontEcho(int16_t raw) const;
   uint8_t sideNearL = 0, sideFarL = 0, sideNearR = 0, sideFarR = 0;
   WallState movingSideWall(bool left) const;
   // Tường TRƯỚC của ô đang đi vào, đọc khi đang chạy trong đoạn [frontWinFrom, frontWinTo] quãng đường ô
@@ -197,6 +213,19 @@ public:
   float frontMoveGain = 0.5f;      // VL53 đọc xa bị nén (tường xa thêm 1 ô chỉ tăng ~70-100mm) -> chỉ cộng 1 phần quãng còn lại
   float cellMm = 180.0f;           // chiều dài 1 ô (mm)
   uint8_t frontNearN = 0, frontFarN = 0;
+  // Dừng theo tường TRƯỚC (không chạm), theo dõi suốt quãng ô cuối: thấy tường thật ở cuối ô thì giảm tốc và dừng
+  // khi VL53 trước = frontAlignMm, thay vì chỉ đếm xung -> bỏ sai số xung cộng dồn khi đi thẳng dài.
+  // Bộ lọc chống tường giả: frontStopSamples mẫu gần LIÊN TIẾP (mẫu -3/lỗi làm lại từ đầu), xe đã đi >= frontStopMinMoveMm
+  // trong các mẫu đó, và (số đo + quãng đã đi) gần như không đổi (lệch <= frontStopConsistMm) = số đo giảm đúng
+  // bằng quãng xe đi, như một tường đứng yên. Mẫu giả nhảy lung tung nên không qua được.
+  bool frontStopEnable = false;
+  float frontStopMaxMm = 300.0f;     // chỉ dùng mẫu VL53 trước <= mức này (mm)
+  uint8_t frontStopSamples = 5;      // số mẫu gần liên tiếp cần có (3..8)
+  float frontStopConsistMm = 20.0f;  // mm: (số đo + quãng đã đi) của các mẫu được lệch nhau tối đa chừng này
+  float frontStopMinMoveMm = 15.0f;  // mm: xe phải đi ít nhất chừng này trong các mẫu đó (xe đứng yên thì không kiểm tra được)
+  float frontStopMaxExtend = 0.2f;   // điểm dừng theo tường XA hơn encoder tối đa phần này của ô (xa hơn = tường ô kế tiếp)
+  bool frontLocked = false;          // lần stepCell hiện tại đã bắt được tường trước thật (sẽ dừng theo tường)
+  long frontStopAdj = 0;             // xung đã dời điểm dừng ở lần stepCell gần nhất (log: >0 đi thêm, <0 dừng sớm)
   WallState movingFrontWall() const;
   // Bắt đầu đi `cells` ô KHÔNG chặn (gọi update() trong vòng lặp tới khi pidRunActive = false)
   void startCells(int cells = 1, bool noStop = false);
@@ -320,8 +349,16 @@ private:
   float _rampFrom = 0.0f;
   unsigned long _rampT0 = 0;
   unsigned long _sideLastTL = 0, _sideLastTR = 0, _sideLastTF = 0;
+  bool _backCalibDone = false;     // đã calib gyro ở lần lùi kịch tường đầu tiên (sau khi bật nguồn)
+  unsigned long _fsLastT = 0;
+  int16_t _fsD[8];                 // số đo VL53 trước (mm) của các mẫu gần liên tiếp
+  long _fsP[8];                    // quãng đã đi (xung) lúc lấy từng mẫu
+  uint8_t _fsN = 0;
+  long _fsBaseTarget = 0;          // điểm dừng theo encoder lúc bắt đầu stepCell
   unsigned long _lastPIDLoopTime;
   unsigned long _lastSensorReadTime;
+  uint8_t _i2cBadCycles = 0;
+  unsigned long _i2cRetryT = 0;
   long _lastEncLeft;
   long _lastEncRight;
   long _startEncLeft;

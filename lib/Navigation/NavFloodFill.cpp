@@ -80,7 +80,6 @@ void RobotNav::startFloodFill(uint8_t mode) {
                " | Đích (" + String(ffGoal.x) + "," + String(ffGoal.y) + ") " +
                String(ffGoalSize) + "x" + String(ffGoalSize);
   Serial.println(msg);
-  serialLink.println(msg);
 }
 
 void RobotNav::stopFloodFill(const char *reason) {
@@ -90,7 +89,6 @@ void RobotNav::stopFloodFill(const char *reason) {
   lastAutoDecision = reason;
   String msg = ">> [CHẾ ĐỘ 4] " + String(reason) + " | Số ô đã đi: " + String(autoCellCount);
   Serial.println(msg);
-  serialLink.println(msg);
 }
 
 // Đếm số ô thẳng liên tiếp (tính từ ô `first`) theo hướng dir mà đường flood-fill hiện tại vẫn đi thẳng
@@ -201,7 +199,6 @@ void RobotNav::stepFloodFill() {
     ffSetWall(ffMaze, ffX, ffY, ffH, true, true);
     String m = ">> [CHẾ ĐỘ 4] Bị tường chặn tại (" + String(ffX) + "," + String(ffY) + "), tính lại đường";
     Serial.println(m);
-    serialLink.println(m);
     delay(80);
     return;
   }
@@ -235,6 +232,5 @@ void RobotNav::stepFloodFill() {
   String m = ">> [CHẾ ĐỘ 4] Ô #" + String(autoCellCount) + " -> (" + String(ffX) + "," +
              String(ffY) + ") " + lastAutoDecision;
   Serial.println(m);
-  serialLink.println(m);
   delay(80);
 }

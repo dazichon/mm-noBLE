@@ -11,6 +11,7 @@
 void applyParams() {
     RobotNav &n = robotNav;
     // VL53 trước: bỏ phản xạ yếu (mặt sàn / mép khung trong hình nón nhìn) -> không còn báo tường giả ~85mm
+    n.frontSignalLimit = VL53_FRONT_SIGNAL_LIMIT;
     if (n.frontReady && VL53_FRONT_SIGNAL_LIMIT > 0.0f) n.sensorFront.setSignalRateLimit(VL53_FRONT_SIGNAL_LIMIT);
     n.motorScaleL = 1.0f + MOTOR_TRIM_LEFT / 100.0f;
     n.motorScaleR = 1.0f + MOTOR_TRIM_RIGHT / 100.0f;
@@ -74,9 +75,20 @@ void applyParams() {
     mapper.goalSize = MAP_GOAL_SIZE;
     mapper.maxCells = MAP_MAX_CELLS;
     mapper.speedrunSpeed = MAP_SPEEDRUN_PWM;
+    mapper.speedTurnCost = MAP_SPEED_TURN_COST;
     mapper.calibBack = MAP_CALIB_BACK;
     mapper.alignFront = MAP_ALIGN_FRONT;
+    mapper.printMap = PRINT_MAP;
+    mapper.tieTowardCenter = MAP_TIE_TOWARD_CENTER;
+    mapper.usePreset = MAP_PRESET;
+    mapper.presetTrust = MAP_PRESET_TRUST;
     n.frontAlignMm = FRONT_ALIGN_MM;
+    n.frontStopEnable = FRONT_STOP_ENABLE;
+    n.frontStopMaxMm = FRONT_STOP_MAX_MM;
+    n.frontStopMaxExtend = FRONT_STOP_MAX_EXTEND;
+    n.frontStopSamples = FRONT_STOP_SAMPLES;
+    n.frontStopConsistMm = FRONT_STOP_CONSIST_MM;
+    n.frontStopMinMoveMm = FRONT_STOP_MIN_MOVE_MM;
     n.frontAlignTol = FRONT_ALIGN_TOL;
     n.frontAlignSkip = FRONT_ALIGN_SKIP;
     n.frontAlignMaxPwm = 55.0f;
@@ -85,6 +97,10 @@ void applyParams() {
     n.frontAlignMinPwm = FRONT_ALIGN_MIN_PWM;
     n.sideWinFrom = MAP_SIDE_FROM;
     n.sideWinTo = MAP_SIDE_TO;
+    n.sideEchoEnable = SIDE_ECHO_ENABLE;
+    n.sideEchoFrontMax = SIDE_ECHO_FRONT_MAX;
+    n.sideEchoRatio = SIDE_ECHO_RATIO;
+    n.sideEchoTol = SIDE_ECHO_TOL;
     mapper.startSidesWall = NAV_START_SIDES_WALL;
 }
 
@@ -233,7 +249,26 @@ void printPendingLogs() {
         Serial.println(robotNav.calibReport);
         robotNav.calibPrinted = true;
     }
-    if (robotNav.navReportPending) {
+    if (robotNav.sensorLogPending()) {
+        delay(300);
+        robotNav.printSensorLog();
+    }
+    if (PRINT_TURN_LOG && robotNav.turnLogPending()) {
+        delay(300);
+        robotNav.printTurnLog();
+    }
+    // Log chạy thẳng (dài, ~1500 dòng) in TRƯỚC; nhật ký + bản đồ in SAU CÙNG để luôn nằm cuối terminal,
+    // không bị log dài đẩy ra khỏi bộ nhớ cuộn
+    static bool printedDone = false;
+    bool runLogPrinted = false;
+    if (robotNav.pidRunActive) printedDone = false;
+    else if (PRINT_RUN_LOG && !printedDone && robotNav.logCount() > 0) {
+        printedDone = true;
+        delay(300);
+        robotNav.printLog();
+        runLogPrinted = true;
+    }
+    if (robotNav.navReportPending || (runLogPrinted && robotNav.navReport.length() > 0)) {
         delay(300);
         Serial.println("==== NHAT KY CHE DO 6 ====");
         Serial.print(robotNav.navReport);
@@ -245,21 +280,5 @@ void printPendingLogs() {
         Serial.println("==== BAN DO TUONG ====");
         Serial.print(mapper.report);
         mapper.reportPending = false;
-    }
-    if (robotNav.sensorLogPending()) {
-        delay(300);
-        robotNav.printSensorLog();
-    }
-    if (robotNav.turnLogPending()) {
-        delay(300);
-        robotNav.printTurnLog();
-    }
-    // Log chạy thẳng: in đúng 1 lần sau mỗi lần xe dừng
-    static bool printedDone = false;
-    if (robotNav.pidRunActive) printedDone = false;
-    else if (!printedDone && robotNav.logCount() > 0) {
-        printedDone = true;
-        delay(300);
-        robotNav.printLog();
     }
 }

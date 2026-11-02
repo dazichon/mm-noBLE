@@ -10,6 +10,7 @@ public:
     bool begin();
     void calibrate(int samples = 300);
     void update();
+    uint16_t readFails() const { return _readFails; } // số lần đọc I2C lỗi liên tiếp (0 = lần gần nhất đọc được)
     bool rotateToAngle(float targetAngle, uint8_t m1In1, uint8_t m1In2,
                        uint8_t m2In1, uint8_t m2In2,
                        float compensation = 18.0f,
@@ -27,6 +28,7 @@ public:
 
 private:
     uint8_t _addr;
+    uint16_t _readFails = 0;
     float _gyroZOffset;
     float _roll;
     float _pitch;

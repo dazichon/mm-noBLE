@@ -38,7 +38,8 @@ void loop() {
     if (motorTestLoop()) return;
 
     robotNav.update();
+    robotNav.recoverI2C();  // lỗi bus I2C: xe đứng yên thì thử khởi động lại cảm biến
     commandHandler.update();
-    if (buttonFired()) runSeqMode();
+    if (buttonFired() && !robotNav.i2cFault) runSeqMode();
     printPendingLogs();
 }

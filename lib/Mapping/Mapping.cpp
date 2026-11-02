@@ -1,5 +1,6 @@
 #include "Mapping.h"
 #include "Motion.h"
+#include "PresetMaze.h"
 
 MazeMapper mapper;
 
@@ -43,6 +44,48 @@ void MazeMapper::setWall(int cx, int cy, int dir, bool wall, bool sure) {
     wallRef(maze.cell(nx, ny), back) = wall;
     known[nx][ny] |= (1 << back);
   }
+}
+
+void MazeMapper::senseWall(int cx, int cy, int dir, bool wall, bool sure) {
+  if (presetLoaded && presetTrust) return;  // tin bản đồ nạp sẵn hơn số đọc khi đang chạy
+  setWall(cx, cy, dir, wall, sure);
+}
+
+// Đọc PRESET_MAZE (vẽ nhìn từ trên, ô xuất phát góc dưới PHẢI, xe quay mặt TÂY) sang toạ độ xe:
+// X_xe = nhãn hàng, Y_xe = nhãn cột; hướng xe 0(trước)=Tây, 1(phải)=Bắc, 2=Đông, 3=Nam -> hướng xe = (hướng ảnh + 1) % 4
+bool MazeMapper::loadPreset() {
+  const char *lines[40];
+  int lens[40], nl = 0;
+  const char *p = PRESET_MAZE;
+  while (*p && nl < 40) {
+    const char *e = p;
+    while (*e && *e != '\n') e++;
+    int len = e - p;
+    if (len > 0 && p[len - 1] == '\r') len--;
+    bool grid = len > 3 && (p[3] == '+' || p[3] == '|');  // bỏ dòng trống và dòng nhãn cột
+    if (grid) { lines[nl] = p; lens[nl] = len; nl++; }
+    p = *e ? e + 1 : e;
+  }
+  if (nl != 2 * MAZE_SIZE + 1) {
+    robotNav.navPrintf(">> [MAP] BAN DO NAP SAN LOI: %d dong (can %d)\n", nl, 2 * MAZE_SIZE + 1);
+    return false;
+  }
+  auto at = [&](int li, int col) -> char { int i = 3 + col; return i < lens[li] ? lines[li][i] : ' '; };
+  for (int r = 0; r < MAZE_SIZE; r++) {
+    int py = MAZE_SIZE - 1 - r;
+    for (int c = 0; c < MAZE_SIZE; c++) {
+      int px = MAZE_SIZE - 1 - c;
+      bool w[4];  // hướng ảnh: 0 = lên, 1 = phải, 2 = xuống, 3 = trái
+      w[0] = at(2 * r, 4 * c + 2) == '-';
+      w[2] = at(2 * r + 2, 4 * c + 2) == '-';
+      w[3] = at(2 * r + 1, 4 * c) == '|';
+      w[1] = at(2 * r + 1, 4 * c + 4) == '|';
+      for (int pd = 0; pd < 4; pd++) setWall(py, px, (pd + 1) % 4, w[pd], true);
+    }
+  }
+  presetLoaded = true;
+  robotNav.navPrintf(">> [MAP] DA NAP BAN DO SAN (PresetMaze.h)%s\n", presetTrust ? ", tin ban do hon so doc khi chay" : "");
+  return true;
 }
 
 bool MazeMapper::hasWall(int cx, int cy, int dir) const {
@@ -91,12 +134,19 @@ String MazeMapper::draw() const {
 
 // Hướng tới ô kề có step flood-fill nhỏ nhất (gọi sau floodfill_update). Hoà điểm thì ưu tiên đi thẳng. -1: bị kẹt
 int MazeMapper::chooseDir(int cx, int cy, int ch) {
+  // Tâm vùng đích (vd đích 2x2 ở (7,7) -> tâm (7.5,7.5)): hoà step thì chọn ô gần tâm hơn theo đường chim bay,
+  // tránh bị "ưu tiên đi thẳng" kéo chạy dọc mép mê cung. Gần như bằng nhau thì vẫn ưu tiên đi thẳng (ít quay)
+  float gx = tX + (tS - 1) * 0.5f, gy = tY + (tS - 1) * 0.5f;
   int best = -1, bestStep = 65535;
+  float bestDist = 1e9f;
   for (int k = 0; k < 4; k++) {
-    int d = (ch + k) % 4;  // k = 0 trước tiên: hoà điểm thì đi thẳng
+    int d = (ch + k) % 4;  // k = 0 trước tiên: đi thẳng được xét đầu
     int nx = cx + DX[d], ny = cy + DY[d];
     if (hasWall(cx, cy, d) || !inMaze(nx, ny)) continue;
-    if (maze.cell(nx, ny).step < bestStep) { bestStep = maze.cell(nx, ny).step; best = d; }
+    int st = maze.cell(nx, ny).step;
+    float dist = (nx - gx) * (nx - gx) + (ny - gy) * (ny - gy);
+    bool better = st < bestStep || (tieTowardCenter && st == bestStep && dist < bestDist - 0.01f);
+    if (better) { bestStep = st; bestDist = dist; best = d; }
   }
   return best;
 }
@@ -111,7 +161,7 @@ int MazeMapper::runStraight(int maxRun) {
   int run = 0;
   bool keepGoing = true;
   String log;  // không in Serial khi đang chạy (USB chậm có thể chặn vòng PID) -> in sau khi dừng
-  char buf[200];
+  char buf[280];
   while (keepGoing && run < maxRun) {
     setWall(x, y, h, false, true);  // sắp đi qua: chắc chắn thông
     int nx = x + DX[h], ny = y + DY[h];
@@ -119,28 +169,41 @@ int MazeMapper::runStraight(int maxRun) {
     long decideAt = (long)(decideFrac * robotNav.pulsesPerCell);
     bool decided = false;
     keepGoing = false;
-    unsigned long t0 = millis();
-    while (robotNav.pidRunActive && millis() - t0 < 6000) {
-      robotNav.update();
-      if (decided || robotNav.stepTraveledPulses < decideAt) continue;
+    // Ghi vách ô nx,ny + chọn chạy tiếp/dừng. moving = false: xe đã dừng trước decideAt (dừng theo tường trước / timeout)
+    auto decide = [&](bool moving) {
       decided = true;
       WallState sl = robotNav.movingSideWall(true), sr = robotNav.movingSideWall(false);
-      WallState fw = robotNav.movingFrontWall();
-      if (sl != WS_UNKNOWN) setWall(nx, ny, (h + 3) % 4, sl == WS_WALL, true);
-      if (sr != WS_UNKNOWN) setWall(nx, ny, (h + 1) % 4, sr == WS_WALL, true);
-      if (fw != WS_UNKNOWN) setWall(nx, ny, h, fw == WS_WALL, false);  // đứng yên đọc lại sẽ ghi đè
-      if (!inTarget(nx, ny) && fw == WS_OPEN && run + 1 < maxRun) {
+      WallState fw = robotNav.frontLocked ? WS_WALL : robotNav.movingFrontWall();  // đã bắt được tường thật thì là tường
+      if (sl != WS_UNKNOWN) senseWall(nx, ny, (h + 3) % 4, sl == WS_WALL, true);
+      if (sr != WS_UNKNOWN) senseWall(nx, ny, (h + 1) % 4, sr == WS_WALL, true);
+      if (fw != WS_UNKNOWN) senseWall(nx, ny, h, fw == WS_WALL, false);  // đứng yên đọc lại sẽ ghi đè
+      if (moving && !inTarget(nx, ny) && fw == WS_OPEN && run + 1 < maxRun) {
         maze.floodfill_update(tX, tY, false, false, tS);
         keepGoing = (chooseDir(nx, ny, h) == h);
       }
       if (!keepGoing) robotNav.stepNoStop = false;  // giảm tốc bò + phanh ở tâm ô
-      snprintf(buf, sizeof(buf), ">> [RUN] O (%d,%d): TRAI=%s(%u/%u) PHAI=%s(%u/%u) TRUOC=%s(%u/%u) -> %s\n", nx, ny,
+      snprintf(buf, sizeof(buf), ">> [RUN] O (%d,%d): TRAI=%s(%u/%u) PHAI=%s(%u/%u) TRUOC=%s(%u/%u)%s%s -> %s\n", nx, ny,
                wsName(sl), robotNav.sideNearL, robotNav.sideFarL, wsName(sr), robotNav.sideNearR, robotNav.sideFarR,
-               wsName(fw), robotNav.frontNearN, robotNav.frontFarN, keepGoing ? "CHAY TIEP" : "DUNG");
+               wsName(fw), robotNav.frontNearN, robotNav.frontFarN, robotNav.frontLocked ? " [BAT TUONG]" : "",
+               (robotNav.sideEchoL || robotNav.sideEchoR) ? " [BO MAU HONG CHAM TUONG TRUOC]" : "",
+               keepGoing ? "CHAY TIEP" : "DUNG");
+      log += buf;
+    };
+    unsigned long t0 = millis();
+    while (robotNav.pidRunActive && millis() - t0 < 6000) {
+      robotNav.update();
+      if (!decided && robotNav.stepTraveledPulses >= decideAt) decide(true);
+    }
+    bool timedOut = robotNav.pidRunActive;
+    if (robotNav.pidRunActive) robotNav.stopPID();
+    if (!decided) {
+      if (timedOut) phanh();  // timeout: dừng cho an toàn
+      decide(false);          // dừng trước decideAt: vẫn ghi vách đã đếm được, không chạy tiếp
+    }
+    if (!keepGoing && robotNav.frontStopAdj != 0) {
+      snprintf(buf, sizeof(buf), ">> [RUN] DUNG THEO TUONG TRUOC: doi diem dung %+ld xung\n", robotNav.frontStopAdj);
       log += buf;
     }
-    if (robotNav.pidRunActive) robotNav.stopPID();
-    if (!decided) { phanh(); keepGoing = false; }  // không kịp quyết định (timeout): dừng cho an toàn
     x = nx; y = ny;
     maze.cell(x, y).run_visited = true;
     run++;
@@ -157,6 +220,8 @@ void MazeMapper::begin() {
   robotNav.navReport = "";
   robotNav.navReportPending = false;
   reset();
+  presetLoaded = false;
+  if (usePreset) loadPreset();
   datHuongGoc();
 
   // Ô xuất phát: có tường sau, 2 bên theo quy ước
@@ -174,6 +239,7 @@ const char *MazeMapper::exploreTo(int tx, int ty, int ts, bool continuous, uint1
   cells = 0;
   bool calibDone = false;
   for (uint16_t loop = 0; loop < maxCells * 4 + 8 && cells < maxCells; loop++) {
+    if (robotNav.i2cFault) { endReason = "LOI BUS I2C"; break; }
     if (inTarget(x, y)) { endReason = "TOI DICH"; break; }
 
     // 0. Biết CHẮC sau lưng có tường -> lùi kịch tường, calib gyro, tiến lại tâm ô (mỗi tư thế x,y,h chỉ 1 lần)
@@ -192,7 +258,7 @@ const char *MazeMapper::exploreTo(int tx, int ty, int ts, bool continuous, uint1
     if (f == WS_WALL && alignFront) canTuongTruoc();  // có tường trước: căn lại đúng tâm ô theo VL53 trước
     // Vách hông KHÔNG lấy lúc đứng yên: tia 45° ở tâm ô chiếu đúng vào cột góc giữa 2 ô nên hay đọc sai.
     // Vách hông được lấy trong lúc đi vào ô (xem bước 3).
-    if (Serial) Serial.print(draw());
+    if (printMap && Serial) Serial.print(draw());
 
     // 2. Flood-fill (tường chưa biết coi như thông) -> chọn hướng có bước nhỏ nhất, ưu tiên đi thẳng
     maze.floodfill_update(tX, tY, false, false, tS);
@@ -217,8 +283,8 @@ const char *MazeMapper::exploreTo(int tx, int ty, int ts, bool continuous, uint1
       robotNav.navPrintf(">> [MAP] VACH HONG O (%d,%d) khi chay: TRAI=%s (gan %u/xa %u) PHAI=%s (gan %u/xa %u)\n", x, y,
                          sl == WS_WALL ? "TUONG" : sl == WS_OPEN ? "THONG" : "?", robotNav.sideNearL, robotNav.sideFarL,
                          sr == WS_WALL ? "TUONG" : sr == WS_OPEN ? "THONG" : "?", robotNav.sideNearR, robotNav.sideFarR);
-      if (sl != WS_UNKNOWN) setWall(x, y, (h + 3) % 4, sl == WS_WALL, true);
-      if (sr != WS_UNKNOWN) setWall(x, y, (h + 1) % 4, sr == WS_WALL, true);
+      if (sl != WS_UNKNOWN) senseWall(x, y, (h + 3) % 4, sl == WS_WALL, true);
+      if (sr != WS_UNKNOWN) senseWall(x, y, (h + 1) % 4, sr == WS_WALL, true);
       cells++;
     } else if (rel == 1) {
       ok = quayPhai(); h = (h + 1) % 4;
@@ -238,9 +304,9 @@ void MazeMapper::finish(const char *reason, uint16_t cells) {
   phanh();
   report = draw();
   robotNav.navPrintf(">> [MAP] KET THUC: %s | o (%d,%d) | da di %u o\n", reason, x, y, cells);
-  if (Serial) Serial.print(report);
-  reportPending = !(bool)Serial;  // chạy rời USB: in khi cắm lại
-  robotNav.navReportPending = !(bool)Serial;
+  if (printMap && Serial) Serial.print(report);
+  reportPending = printMap && !(bool)Serial;  // chạy rời USB: in khi cắm lại (luôn xem được bằng lệnh MAP)
+  robotNav.navReportPending = true;  // xe dừng là tự in nhật ký (sau log chạy thẳng) để luôn nằm cuối terminal
 }
 
 void MazeMapper::explore(bool continuous) {
@@ -261,7 +327,7 @@ void MazeMapper::fullRun() {
   r = exploreTo(0, 0, 1, true, c2);
   robotNav.navPrintf(">> [MAP] LUOT 2 (VE XUAT PHAT): %s | %u o\n", r, c2);
   if (strcmp(r, "TOI DICH") != 0) { finish(r, c1 + c2); return; }
-  if (Serial) Serial.print(draw());
+  if (printMap && Serial) Serial.print(draw());
   cho(500);
   r = speedRun() ? "SPEEDRUN TOI DICH" : "SPEEDRUN LOI";
   finish(r, c1 + c2);
@@ -278,35 +344,58 @@ bool MazeMapper::speedRun() {
     for (int cy = 0; cy < MAZE_SIZE; cy++)
       for (int d = 0; d < 4; d++)
         wallRef(km.cell(cx, cy), d) = !isKnown(cx, cy, d) || hasWall(cx, cy, d);
-  km.floodfill_update(goalX, goalY, false, false, goalSize);
-  if (km.cell(x, y).step >= 65535) {
+  // Tìm đường nhanh nhất (A*/Dijkstra trên trạng thái ô + HƯỚNG xe): chi phí = số ô + speedTurnCost ô cho mỗi lần
+  // quay 90 độ (quay đầu = 2 lần). Cùng hướng đến 1 ô mới là cùng trạng thái -> phạt rẽ tính đúng.
+  // speedTurnCost = 0: đường ít ô nhất (như flood-fill cũ). Chỉ đi qua tường ĐÃ BIẾT là thông.
+  const int NS = MAZE_SIZE * MAZE_SIZE * 4;
+  static uint16_t cost[NS];
+  static int16_t prev[NS];
+  static bool done[NS];
+  const uint16_t INF = 65535;
+  const int CELL_C = 10, TURN_C = (int)lroundf(speedTurnCost * 10.0f);
+  auto sid = [](int cx, int cy, int d) { return (cx * MAZE_SIZE + cy) * 4 + d; };
+  for (int i = 0; i < NS; i++) { cost[i] = INF; prev[i] = -1; done[i] = false; }
+  cost[sid(x, y, h)] = 0;
+  int goalState = -1;
+  for (;;) {
+    int cur = -1;
+    uint16_t cmin = INF;
+    for (int i = 0; i < NS; i++)
+      if (!done[i] && cost[i] < cmin) { cmin = cost[i]; cur = i; }
+    if (cur < 0) break;
+    done[cur] = true;
+    int cd = cur % 4, cy = (cur / 4) % MAZE_SIZE, cx = cur / 4 / MAZE_SIZE;
+    if (inGoal(cx, cy)) { goalState = cur; break; }
+    for (int d = 0; d < 4; d++) {
+      int nx = cx + DX[d], ny = cy + DY[d];
+      if (wallRef(km.cell(cx, cy), d) || !inMaze(nx, ny)) continue;
+      int rel = (d - cd + 4) % 4;
+      int turns = rel == 0 ? 0 : (rel == 2 ? 2 : 1);
+      uint32_t nc = (uint32_t)cost[cur] + CELL_C + turns * TURN_C;
+      int ns = sid(nx, ny, d);
+      if (nc < cost[ns]) { cost[ns] = (uint16_t)min(nc, (uint32_t)(INF - 1)); prev[ns] = cur; }
+    }
+  }
+  if (goalState < 0) {
     robotNav.navPrintf(">> [SPEED] KHONG CO DUONG DA BIET TOI DICH\n");
     return false;
   }
 
-  // Lần theo step giảm dần -> danh sách hướng
+  // Lần ngược prev -> danh sách hướng
   uint8_t path[MAZE_SIZE * MAZE_SIZE];
-  int n = 0, cx = x, cy = y, ch = h;
-  while (!inGoal(cx, cy) && n < MAZE_SIZE * MAZE_SIZE) {
-    int best = -1, bestStep = km.cell(cx, cy).step;
-    for (int k = 0; k < 4; k++) {
-      int d = (ch + k) % 4;  // hoà điểm thì ưu tiên giữ hướng (ít phải quay)
-      int nx = cx + DX[d], ny = cy + DY[d];
-      if (wallRef(km.cell(cx, cy), d) || !inMaze(nx, ny)) continue;
-      if (km.cell(nx, ny).step < bestStep) { bestStep = km.cell(nx, ny).step; best = d; }
-    }
-    if (best < 0) return false;
-    path[n++] = best;
-    cx += DX[best]; cy += DY[best]; ch = best;
-  }
-  String s = ">> [SPEED] DUONG " + String(n) + " O: ";
+  int n = 0;
+  for (int st = goalState; prev[st] >= 0 && n < MAZE_SIZE * MAZE_SIZE; st = prev[st]) path[n++] = st % 4;
+  for (int i = 0; i < n / 2; i++) { uint8_t t = path[i]; path[i] = path[n - 1 - i]; path[n - 1 - i] = t; }
+  int nTurns = 0;
+  for (int i = 0, ph = h; i < n; ph = path[i], i++) if (path[i] != ph) nTurns++;
+  String s = ">> [SPEED] DUONG " + String(n) + " O, " + String(nTurns) + " LAN RE (phat re " + String(speedTurnCost, 1) + " o): ";
   for (int i = 0; i < n; i++) s += "NESW"[path[i]];
   robotNav.navPrintf("%s\n", s.c_str());
 
   uint8_t savedSpeed = robotNav.baseForwardSpeed;
   if (speedrunSpeed > 0) robotNav.baseForwardSpeed = speedrunSpeed;
   bool ok = true;
-  for (int i = 0; i < n && ok;) {
+  for (int i = 0; i < n && ok && !robotNav.i2cFault;) {
     int d = path[i];
     int rel = (d - h + 4) % 4;
     // Trước khi quay: có tường trước (đã biết) thì căn khoảng cách cho đúng tâm ô
@@ -327,5 +416,5 @@ bool MazeMapper::speedRun() {
     x += DX[d] * run; y += DY[d] * run;
   }
   robotNav.baseForwardSpeed = savedSpeed;
-  return ok && inGoal(x, y);
+  return ok && !robotNav.i2cFault && inGoal(x, y);
 }

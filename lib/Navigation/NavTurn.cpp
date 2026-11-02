@@ -6,7 +6,6 @@ void RobotNav::turnRight(float angle) {
   if (!mpuReady) {
     String msg = "MPU6050 chua san sang, khong the quay!";
     Serial.println(msg);
-    serialLink.println(msg);
     return;
   }
   bool completed = mpu6050.rotateToAngle(-angle, M1_IN1, M1_IN2, M2_IN1, M2_IN2,
@@ -14,14 +13,12 @@ void RobotNav::turnRight(float angle) {
   String res =
       completed ? ">> DA RE PHAI XONG" : ">> CANH BAO: RE PHAI TIMEOUT";
   Serial.println(res);
-  serialLink.println(res);
 }
 
 void RobotNav::turnLeft(float angle) {
   if (!mpuReady) {
     String msg = "MPU6050 chua san sang, khong the quay!";
     Serial.println(msg);
-    serialLink.println(msg);
     return;
   }
 
@@ -30,7 +27,6 @@ void RobotNav::turnLeft(float angle) {
   String res =
       completed ? ">> DA RE TRAI XONG" : ">> CANH BAO: RE TRAI TIMEOUT";
   Serial.println(res);
-  serialLink.println(res);
 }
 
 // ================= TEST QUAY TRÁI TẠI CHỖ (MPU6050 feedback) =================
@@ -58,8 +54,9 @@ bool RobotNav::turnLeft90Test(float angle) {
   float stallYaw = prevYaw;     // phát hiện kẹt: yaw không đổi dù đang cấp PWM
   unsigned long stallT = millis();
   bool done = false;
-  while (!done && millis() - t0 < 6000) {
+  while (!done && !i2cFault && millis() - t0 < 6000) {
     mpu6050.update();
+    if (mpu6050.readFails() >= 50) { enterI2CFault("MPU6050 khong tra loi"); break; }
     float yaw = mpu6050.getYaw();
     float err = target - yaw;  // err > 0: yaw cần tăng
     int pl = 0, pr = 0;
@@ -245,7 +242,7 @@ bool RobotNav::calibCellFromBackWall() {
   unsigned long t0 = millis();
   long stallEnc = 0;
   unsigned long stallT = millis();
-  while (millis() - t0 < calibRevMs) {
+  while (millis() - t0 < calibRevMs && !i2cFault) {
     // Chạm vách: đã lùi đủ calibRevMinPulses VÀ encoder đứng yên 100ms -> dừng (tránh dừng sớm khi xe mới nhích chậm)
     long encNow = labs(getLeftEncoder()) + labs(getRightEncoder());
     if (labs(encNow - stallEnc) > 6) { stallEnc = encNow; stallT = millis(); }
@@ -278,13 +275,20 @@ bool RobotNav::calibCellFromBackWall() {
   long reversed = (labs(getLeftEncoder()) + labs(getRightEncoder())) / 2;
   navPrintf(">> [CALIBCELL] DA LUI %ld xung | yaw=%.2f -> calib gyro, giu xe dung yen\n", reversed, mpu6050.getYaw());
 
+  // Chỉ calib gyro ở lần lùi kịch tường ĐẦU TIÊN sau khi bật nguồn; các lần sau chỉ đặt yaw = 0 (tiết kiệm ~0.5s)
+  bool doCalib = !_backCalibDone;
+  // Chờ xe hết rung sau khi ép vào tường: calib cần đứng yên hẳn (150ms); chỉ đặt yaw = 0 thì 30ms cho hết nảy là đủ
   unsigned long s = millis();
-  while (millis() - s < 150) { mpu6050.update(); delay(2); } // đứng yên hẳn trước khi calib gyro
-  mpu6050.calibrate(120); // 120 mẫu (~0.45s) thay vì 300 (~1s): đủ chính xác khi xe đứng yên
+  while (millis() - s < (doCalib ? 150UL : 30UL)) { mpu6050.update(); delay(2); }
+  if (doCalib) {
+    mpu6050.calibrate(120); // 120 mẫu (~0.45s) thay vì 300 (~1s): đủ chính xác khi xe đứng yên
+    _backCalibDone = true;
+  }
   mpu6050.resetYaw();                                          // yaw = 0 là hướng mới
   _turnHeading = 0.0f;
   _turnHeadingValid = true;
-  navPrintf(">> [CALIBCELL] GYRO CALIB XONG, YAW = %.2f | tien %ld xung toi giua o\n", mpu6050.getYaw(), calibFwdPulses);
+  navPrintf(">> [CALIBCELL] %s, YAW = %.2f | tien %ld xung toi giua o\n", doCalib ? "GYRO CALIB XONG" : "RESET YAW (khong calib)",
+            mpu6050.getYaw(), calibFwdPulses);
 
   uint8_t savedCells = hold.cells;
   long savedPulses = pulsesPerCell;
@@ -321,7 +325,7 @@ bool RobotNav::alignFrontWall() {
   unsigned long progT = millis();
   bool ok = false, firstRead = true;
 
-  while (millis() - t0 < frontAlignMaxMs) {
+  while (millis() - t0 < frontAlignMaxMs && !i2cFault) {
     updateSensors();
     if (mpuReady) mpu6050.update();
     if (_tF != lastF) {

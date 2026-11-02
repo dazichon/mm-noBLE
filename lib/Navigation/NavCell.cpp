@@ -56,7 +56,6 @@ WallStatus RobotNav::moveOneCell(char turn, int cells) {
   long skip = (long)(cells - 1) * pulsesPerCell; // xung của các ô đi qua, vách hông chỉ lấy mẫu ở ô cuối
   String startMsg = ">> [ATOMIC] BAT DAU TIEN " + String(cells) + " O (" + String(pulsesPerCell * cells) + " xung)...";
   Serial.println(startMsg);
-  serialLink.println(startMsg);
 
   preWalls = senseCurrentWalls(); // cảm biến nhìn trước 1 ô: đây là vách của ô sắp bước vào
   startCellFresh = false;
@@ -165,7 +164,6 @@ WallStatus RobotNav::moveOneCell(char turn, int cells) {
                   ", Truoc=" + String(curCellWalls.hasFront ? "CO" : "TRONG") +
                   " | Xung: " + String(stepTraveledPulses);
   Serial.println(resMsg);
-  serialLink.println(resMsg);
   reportCell(turn, status, lastMoveBlocked ? nullptr : &curCellWalls, lastMoveBlocked);
 
   return status;

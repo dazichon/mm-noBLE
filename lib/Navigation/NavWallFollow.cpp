@@ -22,7 +22,6 @@ void RobotNav::startAutoWallFollow() {
                String(followRightHand ? "LUẬT TAY PHẢI" : "LUẬT TAY TRÁI") +
                ") - GIỚI HẠN AN TOÀN " + String(autoMaxCells) + " Ô";
   Serial.println(msg);
-  serialLink.println(msg);
 }
 
 void RobotNav::stopAutoWallFollow() {
@@ -33,7 +32,6 @@ void RobotNav::stopAutoWallFollow() {
   lastAutoDecision = "ĐÃ DỪNG";
   String msg = ">> [CHẾ ĐỘ 3] ĐÃ DỪNG TỰ ĐỘNG! Tổng số ô đã chạy: " + String(autoCellCount);
   Serial.println(msg);
-  serialLink.println(msg);
 }
 
 void RobotNav::stepAutoWallFollow() {
@@ -44,7 +42,6 @@ void RobotNav::stepAutoWallFollow() {
     stopAutoWallFollow();
     String limMsg = ">> [CHẾ ĐỘ 3] ĐẠT MỐC AN TOÀN " + String(autoMaxCells) + " Ô! Tự động phanh dừng.";
     Serial.println(limMsg);
-    serialLink.println(limMsg);
     return;
   }
 
@@ -104,7 +101,6 @@ void RobotNav::stepAutoWallFollow() {
   autoCellCount++;
   String statusMsg = ">> [CHẾ ĐỘ 3] Ô #" + String(autoCellCount) + ": " + lastAutoDecision;
   Serial.println(statusMsg);
-  serialLink.println(statusMsg);
 
   // Cho xe nghỉ ổn định 80ms tại tâm ô trước khi sang ô tiếp theo
   delay(80);

@@ -36,6 +36,7 @@ void RobotNav::updateSensors() {
   uint16_t raw_dL = pollSensor(sensorLeft, leftReady, _rawL, _tL, now);
   uint16_t raw_dF = pollSensor(sensorFront, frontReady, _rawF, _tF, now);
   uint16_t raw_dR = pollSensor(sensorRight, rightReady, _rawR, _tR, now);
+  checkI2CFault();
 
   // Lọc EMA cho cảm biến trái
   if (raw_dL < 800) {

@@ -43,15 +43,20 @@ void RobotNav::stepCell(int numCells) {
   stepTargetPulses = (long)numCells * pulsesPerCell;
   stepTraveledPulses = 0;
   sideNearL = sideFarL = sideNearR = sideFarR = 0;
+  sideEchoL = sideEchoR = 0;
   frontNearN = frontFarN = 0;
   _sideLastTF = _tF;
+  _fsLastT = _tF;
+  _fsN = 0;
+  _fsBaseTarget = stepTargetPulses;
+  frontStopAdj = 0;
+  frontLocked = false;
   _sideLastTL = _tL;
   _sideLastTR = _tR;
 
   String msg = ">> [CELL] BAT DAU TIEN " + String(numCells) + " O (" +
                String(stepTargetPulses) + " xung)...";
   Serial.println(msg);
-  serialLink.println(msg);
 }
 
 void RobotNav::updatePIDLoop() {
@@ -94,7 +99,6 @@ void RobotNav::updatePIDLoop() {
     String msg =
         ">> [PID] PHANH DUNG: GAP VAC TUONG TRUOC (" + String(dF) + " mm)";
     Serial.println(msg);
-    serialLink.println(msg);
     return;
   }
 
@@ -108,17 +112,19 @@ void RobotNav::updatePIDLoop() {
     stepTraveledPulses = distTraveled;
 
     // Đếm mẫu vách hông trong cửa sổ của ô cuối (-3 = ngoài tầm = thông; -1/-2 = lỗi, bỏ qua)
-    long lastCellStart = stepTargetPulses - pulsesPerCell;
+    long lastCellStart = _fsBaseTarget - pulsesPerCell;  // theo điểm dừng encoder: dời điểm dừng theo tường trước không làm lệch cửa sổ
     float frac = (float)(distTraveled - lastCellStart) / (float)pulsesPerCell;
     if (frac >= sideWinFrom && frac <= sideWinTo) {
       if (_tL != _sideLastTL) {
         _sideLastTL = _tL;
-        if (_rawL >= 0 && _rawL < navSideWallMm) { if (sideNearL < 255) sideNearL++; }
+        if (sideIsFrontEcho(_rawL)) { if (sideEchoL < 255) sideEchoL++; }  // tia chéo chạm tường trước: bỏ mẫu
+        else if (_rawL >= 0 && _rawL < navSideWallMm) { if (sideNearL < 255) sideNearL++; }
         else if ((_rawL >= 0 || _rawL == -3) && sideFarL < 255) sideFarL++;
       }
       if (_tR != _sideLastTR) {
         _sideLastTR = _tR;
-        if (_rawR >= 0 && _rawR < navSideWallMm) { if (sideNearR < 255) sideNearR++; }
+        if (sideIsFrontEcho(_rawR)) { if (sideEchoR < 255) sideEchoR++; }
+        else if (_rawR >= 0 && _rawR < navSideWallMm) { if (sideNearR < 255) sideNearR++; }
         else if ((_rawR >= 0 || _rawR == -3) && sideFarR < 255) sideFarR++;
       }
     }
@@ -129,6 +135,46 @@ void RobotNav::updatePIDLoop() {
       float thr = navFrontWallMm + (1.0f - frac) * cellMm * frontMoveGain;
       if (_rawF >= 0 && _rawF < thr) { if (frontNearN < 255) frontNearN++; }
       else if ((_rawF >= 0 || _rawF == -3) && frontFarN < 255) frontFarN++;
+    }
+
+    // Dừng theo tường trước (xem bộ lọc ở RobotNav.h). Chạy cả lúc chạy liên tục: thấy tường thật ở cuối ô này thì
+    // bỏ chế độ không dừng -> giảm tốc bình thường và dừng khi VL53 trước = frontAlignMm
+    if (frontStopEnable && frontReady && frac >= 0.0f && _tF != _fsLastT) {
+      _fsLastT = _tF;
+      uint8_t need = constrain(frontStopSamples, (uint8_t)3, (uint8_t)8);
+      if (_rawF > 20 && _rawF <= frontStopMaxMm) {
+        if (_fsN >= need) {  // trượt cửa sổ: bỏ mẫu cũ nhất
+          for (uint8_t i = 1; i < need; i++) { _fsD[i - 1] = _fsD[i]; _fsP[i - 1] = _fsP[i]; }
+          _fsN = need - 1;
+        }
+        _fsD[_fsN] = _rawF;
+        _fsP[_fsN] = distTraveled;
+        _fsN++;
+        if (_fsN >= need) {
+          float mmPerP = cellMm / (float)pulsesPerCell;
+          // Vị trí tường tính từ đầu stepCell (mm) theo từng mẫu: số đo + quãng đã đi. Tường thật -> gần như bằng nhau
+          float wMin = 1e9f, wMax = -1e9f, wSum = 0.0f;
+          for (uint8_t i = 0; i < need; i++) {
+            float w = _fsD[i] + _fsP[i] * mmPerP;
+            wMin = min(wMin, w); wMax = max(wMax, w); wSum += w;
+          }
+          float moved = (_fsP[need - 1] - _fsP[0]) * mmPerP;
+          if (wMax - wMin <= frontStopConsistMm && moved >= frontStopMinMoveMm) {
+            long t = (long)lroundf((wSum / need - frontAlignMm) / mmPerP);
+            // Tường thật (đã qua bộ lọc) GẦN hơn encoder nghĩ: luôn dừng theo tường, dù lệch bao nhiêu (không được đâm vào
+            // tường thật). Đi XA hơn encoder chỉ cho frontStopMaxExtend ô, xa hơn là tường của ô kế tiếp -> bỏ
+            long dt = t - _fsBaseTarget;
+            if (dt <= (long)(frontStopMaxExtend * pulsesPerCell)) {
+              stepTargetPulses = t;
+              frontStopAdj = t - _fsBaseTarget;
+              frontLocked = true;
+              stepNoStop = false;  // có tường ngay cuối ô: không chạy tiếp qua ô được, giảm tốc và dừng
+            }
+          }
+        }
+      } else {
+        _fsN = 0;  // mẫu xa / lỗi: tường giả hay xen -3 nên bắt đầu lại chuỗi
+      }
     }
 
     // Đạt điều kiện dừng khi:
@@ -163,7 +209,6 @@ void RobotNav::updatePIDLoop() {
               "/" + String(stepTargetPulses) + " xung. Phanh dung.";
       }
       Serial.println(msg);
-      serialLink.println(msg);
       return;
     }
   }
@@ -303,6 +348,14 @@ void RobotNav::driveCells(int cells, bool noStop) {
   while (pidRunActive && millis() - t0 < 15000UL * (unsigned long)cells) update();
   if (pidRunActive) stopPID();
   stepNoStop = false;
+}
+
+// Tường trước đã gần: tia 45° của VL53 hông chiếu vào tường trước thay vì vách hông, số đo ~ sideEchoRatio x VL53 trước.
+// Mẫu như vậy không cho biết vách hông -> bỏ (vách hông thật đọc ~160-190mm, không đổi theo VL53 trước)
+bool RobotNav::sideIsFrontEcho(int16_t raw) const {
+  if (!sideEchoEnable || !frontReady || raw < 0) return false;
+  if (_rawF <= 20 || _rawF > sideEchoFrontMax) return false;
+  return fabsf((float)raw - sideEchoRatio * (float)_rawF) <= sideEchoTol;
 }
 
 WallState RobotNav::movingSideWall(bool left) const {

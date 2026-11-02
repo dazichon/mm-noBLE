@@ -40,7 +40,16 @@ public:
   // continuous = false: dừng ở từng ô (SEQ_MODE 8). true: chạy liên tục qua ô thẳng, chỉ dừng để quay (SEQ_MODE 10)
   void explore(bool continuous = false);
   void fullRun();                        // SEQ_MODE 11: dò tới đích -> dò về xuất phát -> speedrun
+  float speedTurnCost = 1.0f;            // speedrun: mỗi lần quay 90 độ tính bằng chừng này ô (0 = chỉ tính số ô)
   uint8_t speedrunSpeed = 0;             // PWM chạy thẳng khi speedrun (0 = giữ tốc độ thường)
+  // Bản đồ nạp sẵn (lib/Mapping/PresetMaze.h): lượt dò đầu đã biết tường -> đi đường ngắn nhất ngay.
+  // presetTrust = true: vách đọc KHI ĐANG CHẠY không ghi đè vách của bản đồ nạp sẵn (đứng yên đọc tường trước vẫn ghi đè)
+  bool usePreset = false;
+  bool presetTrust = true;
+  bool presetLoaded = false;
+  bool loadPreset();
+  void senseWall(int cx, int cy, int dir, bool wall, bool sure);  // ghi vách đọc khi chạy (tôn trọng presetTrust)
+  bool tieTowardCenter = true;           // hoà step: chọn ô gần tâm đích hơn (false: ưu tiên đi thẳng như cũ)
   float decideFrac = 0.80f;              // chạy liên tục: quyết định chạy tiếp/dừng khi đi được phần này của ô
 
   void setWall(int cx, int cy, int dir, bool wall, bool sure);
@@ -59,7 +68,8 @@ public:
   }
 
   String draw() const;                   // bản đồ ASCII
-  String report;                         // bản đồ lần chạy gần nhất
+  String report;                         // bản đồ lần chạy gần nhất (lệnh MAP để in)
+  bool printMap = false;                 // true: tự in bản đồ ở mỗi ô và khi kết thúc
   bool reportPending = false;            // chờ cắm USB để in
 };
 

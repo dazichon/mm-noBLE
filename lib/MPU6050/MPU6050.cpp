@@ -115,10 +115,7 @@ void MPU6050::calibrate(int samples) {
     String calMsg = ">> GYRO CALIB: " + String(validSamples) + "/" + String(samples) +
                     " mau hop le | offset Z = " + String(_gyroZOffset, 3) + " do/s";
     if (reason.length() > 0) calMsg += " | BO KET QUA MOI: " + reason + " -> GIU OFFSET CU";
-    Serial.println(calMsg);
-    if (serialLink.isConnected()) {
-        serialLink.println(calMsg);
-    }
+    Serial.println(calMsg);  // serialLink cũng in ra Serial: không in lần 2
     _roll = 0.0;
     _pitch = 0.0;
     _yaw = 0.0;
@@ -129,8 +126,10 @@ void MPU6050::calibrate(int samples) {
 void MPU6050::update() {
     int16_t ax, ay, az, gx, gy, gz;
     if (!readRawData(&ax, &ay, &az, &gx, &gy, &gz)) {
+        if (_readFails < 65535) _readFails++;
         return; // Đọc I2C thất bại -> bỏ qua vòng này, không tính toán sai góc
     }
+    _readFails = 0;
 
     unsigned long now = micros();
     float dt = (now - _lastTime) / 1000000.0; // Đổi từ micro giây sang giây
@@ -253,11 +252,7 @@ bool MPU6050::rotateToAngle(float targetAngle, uint8_t m1In1, uint8_t m1In2,
     analogWrite(m1In1, 0);
     analogWrite(m1In2, 0);
     analogWrite(m2In1, 0);
-    analogWrite(m2In2, 0);
-    digitalWrite(m1In1, LOW);
-    digitalWrite(m1In2, LOW);
-    digitalWrite(m2In1, LOW);
-    digitalWrite(m2In2, LOW);
+    analogWrite(m2In2, 0);  // chân đang ở chế độ PWM: không dùng digitalWrite (báo lỗi "not set as GPIO")
 
     update();
     float turnedTotal = fabs(_yaw - startAngle);

@@ -1,5 +1,6 @@
 #include "CommandHandler.h"
 #include "Mapping.h"
+#include "MainParams.h"
 
 CommandHandler commandHandler;
 
@@ -44,6 +45,8 @@ void CommandHandler::processSerialCommands() {
     robotNav.stopMotors();
   } else if (cmd == "LOG") {
     robotNav.printLog();
+  } else if (cmd == "TURNLOG") {
+    robotNav.printTurnLog();
   } else if (cmd == "NAV" || cmd == "MAP") {
     // In lại nhật ký dò đường + bản đồ lần chạy gần nhất (khi mở Serial monitor muộn)
     Serial.println("==== NHAT KY ====");
@@ -243,6 +246,7 @@ static void fmtDist(char *buf, size_t n, char tag, int16_t v) {
 #define DEBUG_MOTOR_BALANCE 1
 
 void CommandHandler::sendTelemetry() {
+  if (!PRINT_TELEMETRY) return;
   // Bài test chạy/giữ vị trí: không in telemetry (kể cả sau khi xe dừng), dữ liệu đã nằm trong log RAM
   if (robotNav.holdRun || robotNav.logCount() > 0) return;
 #if DEBUG_MOTOR_BALANCE
@@ -299,5 +303,4 @@ void CommandHandler::printStatus() {
   statusMsg += "PID ACTIVE: " + String(robotNav.pidRunActive ? "YES" : "NO");
 
   Serial.println(statusMsg);
-  serialLink.println(statusMsg);
 }
