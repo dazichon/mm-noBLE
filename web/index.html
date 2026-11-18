@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MM-Robot PID Tune</title>
+<style>
+  :root { --bg:#10141c; --card:#1a2130; --fg:#e8ecf3; --mut:#8a94a6; --acc:#38bdf8; --ok:#22c55e; --bad:#ef4444; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px system-ui,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  button { background:var(--acc); color:#04121c; border:0; border-radius:8px; padding:9px 16px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.sec { background:#2a3447; color:var(--fg); }
+  #st { color:var(--mut); }
+  #st.on { color:var(--ok); }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:14px; }
+  .row { display:grid; grid-template-columns:120px 34px 1fr 34px 86px; gap:10px; align-items:center; padding:6px 0; }
+  .row label { font-weight:600; }
+  input[type=range] { width:100%; }
+  input[type=number] { width:100%; background:#0d1118; color:var(--fg); border:1px solid #2a3447; border-radius:6px; padding:6px; }
+  table { width:100%; border-collapse:collapse; font:13px ui-monospace,Consolas,monospace; }
+  th,td { text-align:right; padding:3px 6px; border-bottom:1px solid #242d40; }
+  th { color:var(--mut); font-weight:500; }
+  .row .pm { padding:6px 0; background:#2a3447; color:var(--fg); }
+  .sv { background:#0d1118; border-radius:8px; padding:8px 10px; }
+  .sv small { display:block; color:var(--mut); font-size:12px; }
+  .sv b { font:600 20px ui-monospace,Consolas,monospace; }
+  h3 { margin:12px 0 2px; font-size:13px; color:var(--acc); text-transform:uppercase; letter-spacing:.05em; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>MM-Robot — Tune PID qua BLE</h1>
+  <div class="bar">
+    <button id="btnConn">Kết nối BLE</button>
+    <span id="st">Chưa kết nối</span>
+  </div>
+
+  <div class="card">
+    <div class="bar"><b>Cảm biến (live)</b>
+      <button class="sec" id="btnCalib" disabled>Calib MPU</button>
+      <button class="sec" id="btnZero" disabled>Reset về 0</button>
+      <span id="msg" style="color:var(--mut);font-size:13px"></span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-top:8px">
+      <div class="sv"><small>VL53 Trái</small><b id="sL">-</b></div>
+      <div class="sv"><small>VL53 Trước</small><b id="sF">-</b></div>
+      <div class="sv"><small>VL53 Phải</small><b id="sR">-</b></div>
+      <div class="sv"><small>Yaw (°)</small><b id="sY">-</b></div>
+      <div class="sv"><small>Enc Trái</small><b id="sEL">-</b></div>
+      <div class="sv"><small>Enc Phải</small><b id="sER">-</b></div>
+      <div class="sv"><small>Trôi MPU (°/phút)</small><b id="sDr">-</b></div>
+      <div class="sv"><small>Đứng yên (s)</small><b id="sDt">-</b></div>
+      <div class="sv"><small>Đo trôi cố định</small><b id="sDm">-</b>
+        <button class="sec" onclick="measDrift(30)" style="padding:4px 8px">30s</button>
+        <button class="sec" onclick="measDrift(60)" style="padding:4px 8px">60s</button></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="bar"><b>Chạy thử</b>
+      <button class="sec" id="cDn" style="padding:9px 12px">−</button>
+      <input type="number" id="cells" value="10" min="1" max="20" step="1" style="width:60px;background:#0d1118;color:var(--fg);border:1px solid #2a3447;border-radius:6px;padding:8px;text-align:center">
+      <button class="sec" id="cUp" style="padding:9px 12px">+</button>
+      <button id="btnRun" disabled>Đi thẳng <span id="cLbl">10</span> ô</button>
+      <button id="btnStop" class="sec" disabled style="background:var(--bad);color:#fff">DỪNG</button>
+      <span id="runSt" style="color:var(--mut)"></span></div>
+    <div style="color:var(--mut);font-size:13px">Đặt xe ở giữa ô, hướng thẳng. Xe chạy bằng thông số bên dưới.</div>
+  </div>
+
+  <div class="card">
+    <div class="bar" style="margin-bottom:6px"><b>Thông số (giống MainParams.h)</b>
+      <button class="sec" id="btnRefresh" disabled>Tải lại từ xe</button></div>
+    <div id="params"><span style="color:var(--mut)">Kết nối để tải thông số.</span></div>
+  </div>
+
+  <div class="card">
+    <div class="bar"><b>Log cảm biến</b> <span style="color:var(--mut);font-size:13px">(tự in sau khi chạy xong)</span>
+      <button id="btnLog" disabled>In 20 log</button>
+      <button class="sec" id="btnCopy" disabled>Copy toàn bộ log</button>
+      <span id="cpSt" style="color:var(--ok);font-size:13px"></span></div>
+    <div class="scroll"><table id="logTbl">
+      <thead><tr><th>#</th><th>ms</th><th>L mm</th><th>F mm</th><th>R mm</th><th>yaw°</th><th>encL</th><th>encR</th><th>pwmL</th><th>pwmR</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+</div>
+
+<script>
+const SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // ghi lệnh
+const TX  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // nhận notify
+const $ = id => document.getElementById(id);
+let dev, rx, buf = "", sendQ = Promise.resolve();
+const timers = {};
+let logRows = [], logHead = "", logKind = "";
+
+function paramsText() {
+  return [...document.querySelectorAll("[data-p]")].map(r => r.dataset.p + "=" + r.querySelector("input[type=number]").value).join(", ");
+}
+function clearLog(kind) {
+  logRows = []; logHead = ""; logKind = kind;
+  $("logTbl").tBodies[0].innerHTML = ""; $("btnCopy").disabled = true; $("cpSt").textContent = "";
+}
+function logText() {
+  return ["# MM-Robot log: " + logKind, "# params: " + paramsText(), logHead ? "# " + logHead : "",
+    "i,ms,L_mm,F_mm,R_mm,yaw_deg,encL,encR,pwmL,pwmR", ...logRows].filter(Boolean).join("\n");
+}
+
+function status(t, on) { $("st").textContent = t; $("st").className = on ? "on" : ""; }
+
+async function connect() {
+  try {
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "MM-Robot" }], optionalServices: [SVC] });
+    dev.addEventListener("gattserverdisconnected", () => {
+      status("Mất kết nối", false); setEnabled(false); });
+    status("Đang kết nối...", false);
+    const srv = await dev.gatt.connect();
+    const svc = await srv.getPrimaryService(SVC);
+    rx = await svc.getCharacteristic(RX);
+    const tx = await svc.getCharacteristic(TX);
+    tx.addEventListener("characteristicvaluechanged", onData);
+    await tx.startNotifications();
+    status("Đã kết nối: " + dev.name, true);
+    setEnabled(true);
+    send("PARAMS");
+  } catch (e) { status("Lỗi: " + e.message, false); }
+}
+
+function setEnabled(on) { $("btnLog").disabled = $("btnRefresh").disabled = $("btnRun").disabled = $("btnStop").disabled = $("btnCalib").disabled = $("btnZero").disabled = !on; }
+
+// Gửi tuần tự, mỗi lệnh kết thúc '\n', chia gói 20 byte
+function send(cmd) {
+  const data = new TextEncoder().encode(cmd + "\n");
+  sendQ = sendQ.then(async () => {
+    for (let i = 0; i < data.length; i += 20) await rx.writeValue(data.slice(i, i + 20));
+  }).catch(e => status("Lỗi gửi: " + e.message, false));
+  return sendQ;
+}
+
+function onData(ev) {
+  buf += new TextDecoder().decode(ev.target.value);
+  let i;
+  while ((i = buf.indexOf("\n")) >= 0) { handle(buf.slice(0, i).trim()); buf = buf.slice(i + 1); }
+}
+
+let drift = null, meas = null;
+function measDrift(sec) { meas = { sec, t0: performance.now(), y0: null }; $("sDm").textContent = "đang đo " + sec + "s..."; }
+function handle(line) {
+  if (line.startsWith("S ")) {
+    const v = line.slice(2).split(",");
+    const mm = x => (+x < 0 ? "lỗi" : x + " mm");
+    $("sL").textContent = mm(v[0]); $("sF").textContent = mm(v[1]); $("sR").textContent = mm(v[2]);
+    $("sY").textContent = v[3]; $("sEL").textContent = v[4]; $("sER").textContent = v[5];
+    // trôi MPU: encoder không đổi + yaw đổi chậm = xe đứng yên; đo độ lệch yaw / thời gian kể từ mốc
+    const now = performance.now(), yaw = +v[3], enc = v[4] + "," + v[5];
+    if (!drift || enc !== drift.enc || Math.abs(yaw - drift.last) > 3) drift = { t0: now, y0: yaw, enc, last: yaw };
+    drift.last = yaw;
+    const dt = (now - drift.t0) / 1000;
+    if (meas) {
+      if (meas.y0 === null) { meas.y0 = yaw; meas.t0 = now; }
+      const e = (now - meas.t0) / 1000;
+      if (e >= meas.sec) {
+        const d = yaw - meas.y0;
+        $("sDm").textContent = d.toFixed(2) + "° / " + meas.sec + "s = " + (d / e * 60).toFixed(2) + " °/phút";
+        meas = null;
+      } else $("sDm").textContent = "đang đo " + e.toFixed(0) + "/" + meas.sec + "s (giữ yên xe)";
+    }
+    $("sDt").textContent = dt.toFixed(0);
+    $("sDr").textContent = dt >= 5 ? ((yaw - drift.y0) / dt * 60).toFixed(2) : "-";
+  } else if (line.startsWith("MSG ")) { $("msg").textContent = line.slice(4);
+  } else if (line.startsWith("P ")) {
+    const [name, rest] = line.slice(2).split("=");
+    const f = rest.split("|");
+    upsertParam(name, +f[0], +f[1], +f[2], +f[3], f[4] || "");
+  } else if (line.startsWith("LOG ")) {
+    const c = line.slice(4).split(",");
+    logRows.push(c.join(","));
+    const tr = document.createElement("tr");
+    tr.innerHTML = c.map(x => "<td>" + x + "</td>").join("");
+    $("logTbl").tBodies[0].appendChild(tr);
+  } else if (line.startsWith("RUN ")) {
+    $("runSt").textContent = line.slice(4);
+    if (/^(done|aborted)/.test(line.slice(4))) logHead = "result: " + line.slice(4);
+  } else if (line === "LOGEND") { $("btnLog").disabled = false; $("btnCopy").disabled = !logRows.length; }
+}
+
+const GROUPS = { "O":"Độ dài ô", "Toc do":"Tốc độ", "Encoder":"Encoder", "Yaw":"Giữ hướng (gyro)", "Tuong":"Bám tường" };
+function upsertParam(name, val, mn, mx, step, grp) {
+  let row = document.querySelector(`[data-p="${name}"]`);
+  if (!row) {
+    if ($("params").querySelector("span")) $("params").innerHTML = "";
+    let box = document.querySelector(`[data-g="${grp}"]`);
+    if (!box) {
+      box = document.createElement("div"); box.dataset.g = grp;
+      box.innerHTML = `<h3>${GROUPS[grp] || grp}</h3>`;
+      $("params").appendChild(box);
+    }
+    row = document.createElement("div");
+    row.className = "row"; row.dataset.p = name;
+    row.innerHTML = `<label>${name}</label><button class="pm">−</button>
+      <input type="range" min="${mn}" max="${mx}" step="${step}"><button class="pm">+</button>
+      <input type="number" min="${mn}" max="${mx}" step="${step}">`;
+    const [dn, up] = row.querySelectorAll("button");
+    const [sl, nm] = row.querySelectorAll("input");
+    const dec = (Math.max(0, Math.ceil(-Math.log10(step))));
+    const push = v => { v = Math.min(mx, Math.max(mn, +v)); sl.value = nm.value = v.toFixed(dec);
+      clearTimeout(timers[name]); timers[name] = setTimeout(() => send(`SET ${name}=${v}`), 200); };
+    sl.oninput = () => push(sl.value);
+    nm.onchange = () => push(nm.value);
+    dn.onclick = () => push(+nm.value - step);
+    up.onclick = () => push(+nm.value + step);
+    box.appendChild(row);
+  }
+  const [sl, nm] = row.querySelectorAll("input");
+  sl.value = val; nm.value = val;
+}
+
+$("btnConn").onclick = connect;
+const cellsN = () => Math.min(20, Math.max(1, Math.round(+$("cells").value || 1)));
+const setCells = v => { $("cells").value = Math.min(20, Math.max(1, v)); $("cLbl").textContent = $("cells").value; };
+$("cDn").onclick = () => setCells(cellsN() - 1);
+$("cUp").onclick = () => setCells(cellsN() + 1);
+$("cells").onchange = () => setCells(cellsN());
+$("btnRun").onclick = () => { setCells(cellsN()); clearLog("RUN " + cellsN() + " cells"); $("runSt").textContent = "..."; send("RUN " + cellsN()); };
+$("btnCalib").onclick = () => { $("msg").textContent = "Đang calib, giữ xe đứng yên..."; send("CALIB"); };
+$("btnZero").onclick = () => send("ZERO");
+$("btnStop").onclick = () => send("STOP");
+$("btnRefresh").onclick = () => send("PARAMS");
+$("btnLog").onclick = () => {
+  clearLog("LOG20 (xe dung yen)"); $("btnLog").disabled = true; send("LOG20"); };
+$("btnCopy").onclick = async () => {
+  const t = logText();
+  try { await navigator.clipboard.writeText(t); }
+  catch { const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+  $("cpSt").textContent = "Đã copy " + logRows.length + " dòng";
+};
+
+if (!navigator.bluetooth) status("Trình duyệt không hỗ trợ Web Bluetooth — dùng Chrome/Edge (HTTPS hoặc localhost)", false);
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@
 #include "CommandHandler.h"
 #include "MainParams.h"
 #include "Mapping.h"
+#include "Motion.h"
 
 // ================= THÔNG SỐ =================
 
@@ -28,21 +29,20 @@ void applyParams() {
     n.turnLeftYawSign = TURN_LEFT_YAW_SIGN;
     n.turnBrakeLead = TURN_BRAKE_LEAD;
 
-    // Cua khi đang chạy
-    n.cornerSpeed = CORNER_SPEED;
-    n.cornerInnerRatio = CORNER_INNER_RATIO;
-    n.cornerDecelZone = CORNER_DECEL_ZONE;
-    n.cornerTolerance = CORNER_TOLERANCE;
-    n.cornerLead = CORNER_LEAD;
 
     // PID đi thẳng
     n.encKp = ENC_STRAIGHT_KP;
     n.encMaxCorr = ENC_MAX_CORR;
+    n.launchMm = LAUNCH_MM;
+    n.launchScaleL = 1.0f + LAUNCH_TRIM_LEFT / 100.0f;
+    n.launchScaleR = 1.0f + LAUNCH_TRIM_RIGHT / 100.0f;
     n.hold.yawKp = HOLD_YAW_KP;
     n.hold.yawKi = HOLD_YAW_KI;
     n.hold.wallEnable = WALL_ENABLE;
     n.hold.wallKp = WALL_KP;
     n.hold.wallMaxCorr = WALL_MAX_CORR;
+    n.straightUseGyro = STRAIGHT_USE_GYRO;
+    n.wallKdPerDeg = WALL_KD;
     n.hold.wallYawGain = WALL_YAW_GAIN;
     n.hold.wallYawMax = WALL_YAW_MAX;
     n.hold.wallBaseL = WALL_BASE_L;
@@ -67,22 +67,13 @@ void applyParams() {
     n.ffContinuous = FF_CONTINUOUS;
     n.ffMaxRun = FF_MAX_RUN;
 
-    // Dò đường + vẽ bản đồ
-    mapper.cols = MAP_COLS;
-    mapper.rows = MAP_ROWS;
-    mapper.goalX = MAP_GOAL_X;
-    mapper.goalY = MAP_GOAL_Y;
-    mapper.goalSize = MAP_GOAL_SIZE;
-    mapper.maxCells = MAP_MAX_CELLS;
-    mapper.speedrunSpeed = MAP_SPEEDRUN_PWM;
     mapper.speedTurnCost = MAP_SPEED_TURN_COST;
-    mapper.calibBack = MAP_CALIB_BACK;
     mapper.alignFront = MAP_ALIGN_FRONT;
     mapper.printMap = PRINT_MAP;
     mapper.tieTowardCenter = MAP_TIE_TOWARD_CENTER;
-    mapper.usePreset = MAP_PRESET;
     mapper.presetTrust = MAP_PRESET_TRUST;
     n.frontAlignMm = FRONT_ALIGN_MM;
+    n.frontEmergencyMm = FRONT_EMERGENCY_MM;
     n.frontStopEnable = FRONT_STOP_ENABLE;
     n.frontStopMaxMm = FRONT_STOP_MAX_MM;
     n.frontStopMaxExtend = FRONT_STOP_MAX_EXTEND;
@@ -101,7 +92,147 @@ void applyParams() {
     n.sideEchoFrontMax = SIDE_ECHO_FRONT_MAX;
     n.sideEchoRatio = SIDE_ECHO_RATIO;
     n.sideEchoTol = SIDE_ECHO_TOL;
+    applyModeParams();
+}
+
+// Thông số phụ thuộc chế độ (gọi lại mỗi lần đổi chế độ bằng công tắc DS1)
+void applyModeParams() {
+    const int m = seqMode;
+    const bool slalom = (m == 2 || m == 5 || m == 6 || m == 7 || m == 9 || m == 11);
+    mapper.cols = MAP_COLS;
+    mapper.rows = MAP_ROWS;
+    mapper.startX = MAP_START_X;
+    mapper.startY = MAP_START_Y;
+    mapper.goalX = MAP_GOAL_X;
+    mapper.goalY = MAP_GOAL_Y;
+    mapper.goalSize = MAP_GOAL_SIZE;
+    mapper.maxCells = MAP_MAX_CELLS;
+    mapper.speedrunSpeed = MAP_SPEEDRUN_PWM;  // mọi mode đi thẳng cùng PWM + PID của mode 3; mode cua chỉ dùng PID cua khi cua
+    mapper.slalomTurns = slalom;
+    mapper.calibBack = MAP_CALIB_BACK && !slalom;  // chạy bằng cua: không lùi kịch tường
+    mapper.calibBackErrDeg = 0.0f;                 // mode 1: lùi calib mọi lần có tường sau
+    if ((m >= 7 && m <= 11) || m == 2 || m == 5) {   // mọi mode có speedrun (mode cua 2/5/7/9/11 + quay tại chỗ 8/10)                       // map vòng loại / APEC: chỉ lùi calib khi MPU lệch quá SPEED_CALIB_ERR_DEG
+        mapper.calibBack = true;
+        mapper.calibBackErrDeg = SPEED_CALIB_ERR_DEG;
+    }
+    mapper.usePreset = (MAP_PRESET || m == 2 || m >= 7) && m != 5 && m != 6;  // mode 2, 7-10 bắt buộc dùng map nạp sẵn
     mapper.startSidesWall = NAV_START_SIDES_WALL;
+    mapper.presetQual = (m == 7 || m == 8);
+    mapper.presetApec = (m == 9 || m == 10);
+    mapper.presetApec2 = (m == 11);
+    if (m == 5) {
+        // Mode 5: dò map 16x16 (KHÔNG nạp sẵn) như kích thước mode 11 -> dò tới đích, dò về, speedrun bằng cua
+        mapper.cols = 16; mapper.rows = 16;
+        mapper.startX = MAP_APEC_START_X; mapper.startY = MAP_APEC_START_Y;
+        mapper.goalX = MAP_APEC_GOAL_X; mapper.goalY = MAP_APEC_GOAL_Y; mapper.goalSize = MAP_APEC_GOAL_SIZE;
+        mapper.maxCells = 400;
+    }
+    if (mapper.presetQual) {
+        // Map vòng loại 16x16 (mode 7: cua, mode 8: quay tại chỗ): xuất phát (0,0) mặt Bắc, đích 2x2 tại (7,7)
+        mapper.cols = 16; mapper.rows = 16;
+        mapper.startX = 0; mapper.startY = 0;
+        mapper.goalX = 7; mapper.goalY = 7; mapper.goalSize = 2;
+        mapper.maxCells = 400;
+    }
+    if (mapper.presetApec || mapper.presetApec2) {
+        // Map APEC 16x16 (mode 9: cua, mode 10: quay tại chỗ)
+        mapper.cols = 16; mapper.rows = 16;
+        mapper.startX = MAP_APEC_START_X; mapper.startY = MAP_APEC_START_Y;
+        mapper.goalX = MAP_APEC_GOAL_X; mapper.goalY = MAP_APEC_GOAL_Y; mapper.goalSize = MAP_APEC_GOAL_SIZE;
+        mapper.maxCells = 400;
+    }
+}
+
+// ================= CÔNG TẮC CHỌN CHẾ ĐỘ (DS1) + NÚT KEY2 =================
+// DS1 + điện trở tạo 8 mức điện áp trên BW (GPIO0). Mức thật ĐO TRÊN XE ghi vào MODE_LEVELS_MV (MainParams.h),
+// không tính theo schematic (đo thực tế khác: tắt hết ~2900 mV). KEY2 kéo BW lên 3.3V -> bấm nút ~3365 mV.
+int seqMode = SEQ_MODE;
+
+static uint32_t readBwMv() {
+    uint32_t s = 0;
+    for (int i = 0; i < 32; i++) s += analogReadMilliVolts(BUTTON);  // ADC nhiễu ~±130 mV -> lấy trung bình nhiều mẫu
+    return s / 32;
+}
+
+// Vị trí 0..7 = ô trong MODE_LEVELS_MV gần nhất; -1 = đang bấm nút / không khớp mức nào (mức 0 = chưa đo, bỏ qua)
+static int switchCodeFromMv(uint32_t mv) {
+    if (mv >= MODE_BTN_MIN_MV) return -1;
+    static const int LV[8] = MODE_LEVELS_MV;
+    int best = -1;
+    long bestErr = 1000000;
+    for (int c = 0; c < 8; c++) {
+        if (LV[c] <= 0) continue;
+        long e = labs((long)mv - (long)LV[c]);
+        if (e < bestErr) { bestErr = e; best = c; }
+    }
+    return bestErr <= MODE_SW_TOL_MV ? best : -1;
+}
+
+void initModeSwitch() {
+#if MODE_SWITCH_ENABLE
+    pinMode(BUTTON, INPUT);  // KHÔNG pull-up: điện trở kéo trong làm lệch mức điện áp
+    analogSetPinAttenuation(BUTTON, ADC_11db);
+    updateModeSwitch(true);
+#else
+    pinMode(BUTTON, INPUT_PULLUP);
+#endif
+}
+
+// Đọc DS1 (chỉ khi xe không chạy) -> nhớ vào "chế độ chờ". Gạt công tắc KHÔNG đổi chế độ ngay:
+// chỉ khi bấm KEY2 (commitModeSwitch) chế độ chờ mới được kích hoạt. force = true (lúc bật nguồn): kích hoạt luôn.
+static int pendingMode = SEQ_MODE, pendingCode = -1;
+static uint32_t pendingMv = 0;
+
+void updateModeSwitch(bool force) {
+#if MODE_SWITCH_ENABLE
+    static unsigned long lastT = 0;
+    static int lastCode = -2, stable = 0;
+    if (!force && (robotNav.pidRunActive || millis() - lastT < 100)) return;
+    lastT = millis();
+    uint32_t mv = readBwMv();
+    int code = switchCodeFromMv(mv);
+    if (force) Serial.printf(">> [MODE] BW = %lu mV\n", (unsigned long)mv);
+    static uint32_t lastPrintMv = 0;  // chẩn đoán: in điện áp BW mỗi khi đổi > 40 mV (gạt công tắc / bấm nút)
+    if (labs((long)mv - (long)lastPrintMv) > 15) {
+        lastPrintMv = mv;
+        Serial.printf(">> [MODE] BW = %lu mV -> %s\n", (unsigned long)mv,
+                      mv >= MODE_BTN_MIN_MV ? "COI LA DANG BAM NUT" : code < 0 ? "KHONG KHOP MUC NAO" : "khop cong tac");
+    }
+    if (code < 0) return;  // đang bấm nút hoặc mức lạ: giữ chế độ chờ cũ
+    stable = (code == lastCode) ? stable + 1 : 0;
+    lastCode = code;
+    if (!force && stable < 3) return;  // chống dội khi đang gạt
+    static const int TABLE[8] = MODE_SWITCH_TABLE;
+    if (code != pendingCode) {
+        pendingCode = code;
+        pendingMode = TABLE[code];
+        pendingMv = mv;
+        if (!force) Serial.printf(">> [MODE] VI TRI %d (BW %lu mV) -> CHE DO %d (bam nut de kich hoat)\n", code, (unsigned long)mv, pendingMode);
+    }
+    if (force) commitModeSwitch();
+#else
+    (void)force;
+#endif
+}
+
+// Bấm KEY2: kích hoạt chế độ đang gạt trên DS1
+void commitModeSwitch() {
+#if MODE_SWITCH_ENABLE
+    seqMode = pendingMode;
+    applyModeParams();
+    if (pendingCode < 0)
+        Serial.printf(">> [MODE] KICH HOAT CHE DO %d (CHUA DOC DUOC CONG TAC -> dung SEQ_MODE mac dinh)\n", seqMode);
+    else
+        Serial.printf(">> [MODE] KICH HOAT CHE DO %d (vi tri %d, BW %lu mV)\n", seqMode, pendingCode, (unsigned long)pendingMv);
+#endif
+}
+
+static bool buttonDown() {
+#if MODE_SWITCH_ENABLE
+    return readBwMv() >= MODE_BTN_MIN_MV;  // KEY2 kéo BW lên 3.3V
+#else
+    return digitalRead(BUTTON) == LOW;
+#endif
 }
 
 // ================= KHỞI ĐỘNG =================
@@ -180,17 +311,17 @@ bool motorTestLoop() {
 
 // ================= NÚT BẤM =================
 
-// Nhấn = LOW (chỉ nhận khi xe không đang chạy thẳng). Mỗi lần bấm = 1 lần chạy: phải nhả nút mới nhận lần sau
+// Nhấn KEY2 (chỉ nhận khi xe không đang chạy thẳng). Mỗi lần bấm = 1 lần chạy: phải nhả nút mới nhận lần sau
 bool buttonFired() {
     static unsigned long pressedAt = 0;
     static bool armed = true;
-    if (!armed && pressedAt == 0 && digitalRead(BUTTON) == HIGH) {
+    if (!armed && pressedAt == 0 && !buttonDown()) {
         delay(30);
-        if (digitalRead(BUTTON) == HIGH) armed = true;
+        if (!buttonDown()) armed = true;
     }
-    if (armed && !robotNav.pidRunActive && pressedAt == 0 && digitalRead(BUTTON) == LOW) {
+    if (armed && !robotNav.pidRunActive && pressedAt == 0 && buttonDown()) {
         delay(30);
-        if (digitalRead(BUTTON) == LOW) { pressedAt = millis(); armed = false; }
+        if (buttonDown()) { pressedAt = millis(); armed = false; }
     }
     if (pressedAt != 0 && millis() - pressedAt >= TURN_DELAY_MS) {
         pressedAt = 0;
@@ -201,49 +332,62 @@ bool buttonFired() {
 
 // ================= CHẾ ĐỘ SEQ_MODE =================
 
-// Phanh sớm STOP_LEAD_PULSES chỉ dùng trong các chế độ 1, 2, 6
-static void withStopLead(void (RobotNav::*fn)()) {
-    robotNav.stopLeadPulses = STOP_LEAD_PULSES;
-    (robotNav.*fn)();
-    robotNav.stopLeadPulses = 0;
+// Lấy mốc tường hông tại ô xuất phát: xe đặt GIỮA ô (2 bên có tường), đứng yên, đọc VL53 trái/phải
+// WALL_CALIB_MS rồi lấy trung bình làm wallBaseL/R. Số đọc lệch quá WALL_CALIB_MAX_DEV so với WALL_BASE_* thì bỏ
+// (không có tường / đặt xe lệch) và giữ giá trị mặc định
+static void calibWallBase() {
+    const uint32_t ms = WALL_CALIB_MS;
+    float sumL = 0, sumR = 0; int nL = 0, nR = 0;
+    unsigned long lastL = robotNav._tL, lastR = robotNav._tR;
+    unsigned long t0 = millis();
+    while (millis() - t0 < ms) {
+        robotNav.updateSensors();
+        if (robotNav._tL != lastL) {
+            lastL = robotNav._tL;
+            int16_t v = robotNav._rawL;
+            if (v > 0 && fabsf(v - WALL_BASE_L) <= WALL_CALIB_MAX_DEV) { sumL += v; nL++; }
+        }
+        if (robotNav._tR != lastR) {
+            lastR = robotNav._tR;
+            int16_t v = robotNav._rawR;
+            if (v > 0 && fabsf(v - WALL_BASE_R) <= WALL_CALIB_MAX_DEV) { sumR += v; nR++; }
+        }
+        delay(2);
+    }
+    const int minN = 6;
+    if (nL >= minN) robotNav.hold.wallBaseL = sumL / nL;
+    if (nR >= minN) robotNav.hold.wallBaseR = sumR / nR;
+    robotNav.navPrintf(">> [WALLCAL] moc tuong L=%.1f R=%.1f (mau %d/%d)%s\n", robotNav.hold.wallBaseL, robotNav.hold.wallBaseR,
+                       nL, nR, (nL >= minN && nR >= minN) ? "" : " - THIEU MAU, GIU MAC DINH ben do");
 }
 
 void runSeqMode() {
-#if SEQ_MODE == 1
-    withStopLead(&RobotNav::runCellToCellTest);
-#elif SEQ_MODE == 2
-    withStopLead(&RobotNav::runDeadEndTest);
-#elif SEQ_MODE == 3
-    robotNav.runCalibTest(4);
-#elif SEQ_MODE == 4
-    robotNav.runCornerNavTest();
-#elif SEQ_MODE == 5
-    robotNav.runSensorStreamTest();
-#elif SEQ_MODE == 6
-    withStopLead(&RobotNav::runCellNavTest);
-#elif SEQ_MODE == 7
-    kichBan();
-#elif SEQ_MODE == 8
+    applyModeParams();
+    if (WALL_CALIB_MS > 0 && seqMode != 3 && seqMode != 4) calibWallBase();
+    Serial.printf(">> [MODE] CHAY CHE DO %d\n", seqMode);
     robotNav.stopLeadPulses = STOP_LEAD_PULSES;
-    mapper.explore();
+    switch (seqMode) {
+    case 1: mapper.fullRun(); break;                // dò tới đích -> dò về xuất phát -> speedrun (quay tại chỗ)
+    case 2: mapper.runKnownMap(); break;            // map 5x5 nạp sẵn, rẽ bằng cua
+    case 5: mapper.fullRunSlalom(); break;          // như mode 1 nhưng rẽ bằng cua Slalom
+    case 6: mapper.roamSlalom(ROAM_CELLS); break;   // chạy tự do ROAM_CELLS ô
+    case 7: case 8:                                 // map vòng loại: 7 cua / 8 quay tại chỗ
+    case 9: case 10: mapper.runKnownMap(); break;   // map APEC: 9 cua / 10 quay tại chỗ
+    case 11: mapper.runKnownMap(); break;           // map APEC 2: cua (như 9)
+    case 4: robotNav.runSlalomTest(); break;        // thử 1 lần cua Slalom
+    default: break;                                 // 3: chỉ BLE, bấm nút không làm gì
+    }
     robotNav.stopLeadPulses = 0;
-#elif SEQ_MODE == 10
-    robotNav.stopLeadPulses = STOP_LEAD_PULSES;
-    mapper.explore(true);  // chạy liên tục qua ô thẳng
-    robotNav.stopLeadPulses = 0;
-#elif SEQ_MODE == 11
-    robotNav.stopLeadPulses = STOP_LEAD_PULSES;
-    mapper.fullRun();  // dò tới đích -> dò về xuất phát -> speedrun
-    robotNav.stopLeadPulses = 0;
-#else
-    robotNav.turnLeft90Test(TURN_RIGHT ? -TURN_ANGLE : TURN_ANGLE); // góc dương = trái, âm = phải
-#endif
 }
 
 // ================= IN LOG KHI CẮM USB =================
 
 void printPendingLogs() {
     if (!(bool)Serial) return;
+    if (robotNav.flashLogPending) {
+        delay(300);
+        robotNav.printFlashLog();
+    }
     if (!robotNav.calibPrinted) {
         delay(300);
         Serial.println(robotNav.calibReport);
@@ -252,6 +396,10 @@ void printPendingLogs() {
     if (robotNav.sensorLogPending()) {
         delay(300);
         robotNav.printSensorLog();
+    }
+    if (robotNav.slalomLogPending()) {
+        delay(300);
+        robotNav.printSlalomLog();
     }
     if (PRINT_TURN_LOG && robotNav.turnLogPending()) {
         delay(300);
@@ -274,6 +422,7 @@ void printPendingLogs() {
         Serial.print(robotNav.navReport);
         Serial.println("==== HET NHAT KY ====");
         robotNav.navReportPending = false;
+        robotNav.dropFlashLog();  // đã in trực tiếp, không in lại từ flash
     }
     if (mapper.reportPending) {
         delay(300);

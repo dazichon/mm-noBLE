@@ -30,14 +30,13 @@ struct HoldParams {
   float wallBaseL = 173.0f;   // VL53 trái khi xe ở giữa (mm)
   float wallBaseR = 168.0f;   // VL53 phải khi xe ở giữa (mm)
   float wallValidMax = 250.0f; // đọc xa hơn mức này = không có tường (hở/ô kế tiếp) -> bỏ qua
-  float wallErrClamp = 30.0f; // kẹp sai lệch (mm)
+  float wallErrClamp = 50.0f; // kẹp sai lệch (mm)
   float wallYawGain = 0.15f;  // độ / mm: wall dịch hướng đích của gyro (0 = cộng PWM kiểu cũ)
   float wallYawMax = 5.0f;    // độ: dịch hướng tối đa
   bool useFront = true;       // false: bỏ VL53 trước (không dùng để phanh)
   uint8_t cells = 5;       // số ô chạy trong bài test
 };
 
-enum CornerState : uint8_t { STRAIGHT, CORNER_LEFT, CORNER_RIGHT, EXIT_CORNER };
 
 // Trạng thái 1 bên tường khi đọc an toàn (SEQ_MODE 6): lỗi/không chắc KHÔNG được coi là "thông"
 enum WallState : uint8_t { WS_UNKNOWN, WS_OPEN, WS_WALL };
@@ -144,6 +143,13 @@ public:
   bool encoderSyncActive;
   float encKp;
   float yawMaxCorr = 20.0f; // giới hạn hiệu chỉnh yaw (PWM)
+  // Pha launch (ô đầu sau xuất phát / đảo chiều lùi -> tiến): cân encoder riêng
+  float launchMm = 180.0f;
+  float launchScaleL = 1.0f;     // thay motorScaleL lúc xuất phát
+  float launchScaleR = 1.0f;     // thay motorScaleR lúc xuất phát
+  bool _launchActive = false;
+  // Hệ số motor đang dùng: launchScale lúc đề, chuyển dần về motorScale hết launchMm
+  void launchScale(float travL, float travR, float &sL, float &sR);
   float encMaxCorr = 10.0f; // giới hạn hiệu chỉnh encoder (PWM) mỗi bên: chỉ cân 2 bánh, không được bẻ lái mạnh
   bool invertEncLeft;
   bool invertEncRight;
@@ -245,34 +251,14 @@ public:
   bool turnLeft90Test(float angle = 90.0f);
   void printTurnLog();
   uint16_t seqCellPulses = 4200; // xung/ô cho sequence test (giá trị tạm, chưa calib)
-  // Cua 90° khi đang chạy (không quay tại chỗ): 2 bánh PWM khác nhau, yaw MPU là feedback, giảm độ cong khi gần target
-  float cornerSpeed = 60.0f;       // PWM bánh ngoài (cua chậm)
-  float cornerInnerRatio = 0.45f;  // PWM bánh trong / bánh ngoài ở độ cong tối đa (nhỏ = cua gắt)
-  float cornerDecelZone = 30.0f;   // độ: trong vùng này độ cong giảm dần về 0
-  float cornerMinCurve = 0.2f;     // độ cong tối thiểu (0..1) để không đứng lại khi còn sai số
-  float cornerTolerance = 2.0f;    // độ: coi là tới target
-  float cornerLead = 0.05f;        // s: dự đoán sai số = err - tốc độ quay * lead (giảm overshoot)
 
-  // Corner Controller (state machine không chặn): STRAIGHT -> CORNER_LEFT/RIGHT -> EXIT_CORNER -> STRAIGHT
-  // Navigation gọi startCornerLeft()/startCornerRight(); RobotNav::update() tự chạy updateCorner().
-  // Khi đang cua, PID đi thẳng (updatePIDLoop) tạm nghỉ; thoát cua thì reset PID rồi chạy tiếp.
-  CornerState cornerState = STRAIGHT;
-  uint16_t cornerEntryMs = 120;    // ms: giảm tốc từ tốc độ chạy thẳng về cornerSpeed khi vào cua
-  uint16_t cornerExitMs = 150;     // ms: tăng tốc từ cornerSpeed về tốc độ chạy thẳng khi thoát cua
-  uint16_t cornerTimeoutMs = 3500; // ms: quá thời gian này coi như tới target để không cua vô tận
-  float cornerStartYaw = 0.0f;     // yaw lúc bắt đầu cua
-  float cornerTargetYaw = 0.0f;    // yaw đích, chuẩn hóa về [-180, 180]
-  bool startCornerLeft();
-  bool startCornerRight();
-  void updateCorner();
-  bool cornerBusy() const { return cornerState != STRAIGHT; }
   // Calib lại 1 ô khi vào ngõ cụt: sau khi quay 180° lùi sát vách cụt (mốc đầu ô) rồi tiến calibFwdPulses xung tới tâm ô
   float calibRevPwm = 60.0f;            // PWM khi lùi sát vách
   uint16_t calibRevMs = 100;            // ms: thời gian lùi (cố định), sau đó dừng, calib gyro về 0 độ rồi tiến calibFwdPulses
   long calibFwdPulses = 1500;           // xung: từ vách tới tâm ô (không tính vào quãng 1 ô tiếp theo)
   long calibRevMinPulses = 1300;        // xung: phải lùi ít nhất chừng này mới được coi là chạm vách (chống dừng sớm)
   uint16_t calibSquareMs = 120;         // ms: ép thêm vào vách sau khi chạm để lưng xe áp phẳng
-  bool calibCellFromBackWall();
+  bool calibCellFromBackWall(bool noForward = false);  // noForward: chỉ lùi chạm vách + reset yaw, KHÔNG tiến về tâm ô (đoạn sau tự cộng calibFwdPulses)
   // Căn khoảng cách tới tường TRƯỚC MẶT (xe đứng yên, có tường trước): tiến/lùi P theo VL53 trước tới frontAlignMm,
   // giữ hướng bằng gyro. Sửa sai số quãng đường dồn từ các ô trước (xung/ô, trôi khi phanh). CHẶN, tối đa frontAlignMaxMs
   float frontAlignMm = 120.0f;     // VL53 trước đọc bao nhiêu khi xe ở đúng tâm ô
@@ -300,13 +286,62 @@ public:
   String sensorReport;                  // thống kê thời gian đo thực tế của lần ghi gần nhất
   bool sensorLogPending() const { return _sensorLogN > 0 && !_sensorLogPrinted; }
   void printSensorLog();
+  void slalomLogReset();           // xóa log các lần cua (bắt đầu lần chạy mới)
+  const String &slalomLogText() const;
+  bool flashLogPending = false;    // có log lần chạy trước trong flash chưa in
+  bool saveRunLog();               // ghi nhật ký + log cua ra flash (NavRunLog.cpp)
+  void checkFlashLog();
+  void printFlashLog();
+  void dropFlashLog();
+  void printSlalomLog();           // in log Slalom đã lưu trong RAM ra Serial (khi cắm USB)
+  bool slalomLogPending() const;
+  void runSlalomTest();            // MODE 4: một lần cua Slalom 90° theo tiến độ encoder + phản hồi yaw/gyro MPU, rồi dừng + in log (NavSlalom.cpp)
+  bool slalomTurn(bool left, bool moving);   // một lần cua Slalom (moving = true: đang chạy liên tục, cua xong không dừng)
+  bool slalomStraight(float distMm, bool moving, bool handOver, bool frontWall);   // đi thẳng distMm: tốc độ theo encoder (PI), giữ hướng gyro + bám tường hông VL53; handOver: cuối đoạn không phanh; frontWall: có tường trước (đã biết) -> VL53 trước chốt điểm vào cua
+  // Chốt điểm vào cua bằng MÉP TƯỜNG HÔNG (map nạp sẵn): mắt hông bên sắp rẽ thấy có tường rồi chuyển sang TRỐNG
+  // (lối rẽ ở ô phía trước, vì mắt hông nhìn chéo ~1 ô) -> đi thêm SLALOM_EDGE_TURN_MM rồi cua. 0 = tắt, 1 = trái, 2 = phải
+  uint8_t slEdgeSide = 0;
+  float slEdgeMinS = 0.0f;           // mm: chỉ nhận mép trống khi đã đi được chừng này trong đoạn (bỏ qua lối hở ở các ô trước)
+  float slEdgeAtMm = -1.0f;          // mm: vị trí s lúc thấy mép (-1 = không thấy) - để in log
+  bool slExplore = false;            // mode 5: đoạn thẳng đang DÒ (chưa biết tường trước, đếm vách hông)
+  int slFront0 = 0;                 // VL53 trước (mm) lúc BẮT ĐẦU đoạn thẳng (chẩn đoán: so với quãng đường encoder đã đi)
+  bool frontCovered = false;        // VL53 trước bị che kín (đọc <= SLALOM_FRONT_COVER_MM liên tiếp) -> dừng khẩn cấp, mapper kết thúc chạy + lưu log
+  // Đi thẳng KHÔNG dùng gyro (STRAIGHT_USE_GYRO = 0): chỉ encoder + tường. Gyro chỉ dùng khi quay/cua.
+  bool straightUseGyro = true;
+  // Hướng chuẩn TUYỆT ĐỐI (lý tưởng): +-90 mỗi lần quay/cua, chỉ về 0 khi lùi kịch tường calib.
+  // Đi thẳng không gyro thì cua tính từ hướng thực -> _turnHeading không còn đo được độ trôi, dùng biến này để biết lệch > 8 độ
+  float _absHeading = 0.0f;
+  // Vừa lùi kịch tường calib (yaw = 0 chắc chắn đúng) và chưa quay/cua lần nào: đi thẳng KHÔNG có tường hông thì giữ hướng bằng gyro
+  bool _yawFresh = false;
+  // Cân encoder chỉ khi KHÔNG có tường hông: có tường thì tường lái (2 bánh phải chênh nhau), encoder không được kéo ngược.
+  // _encOff = chênh xung |L|-|R| tại lúc mất tường, encoder chỉ cân phần chênh phát sinh SAU đó
+  float _encOff = 0.0f;
+  float slNoWallMm = 0.0f;           // mm đầu đoạn KHÔNG bám tường (vừa lùi kịch tường calib: xe đã vuông góc, bộ lọc tường còn số cũ)
+  float wallKdPerDeg = 0.0f;         // PWM trên mỗi độ xe chéo so với tường (góc ước từ sai lệch tường thay đổi theo quãng đường)
+  float _wHist[6] = {0};             // sai lệch tường mỗi 10 mm (mới nhất ở [0])
+  uint8_t _wHistN = 0, _wCombo = 0;
+  float _wHistS = -1000.0f;
+  float _wallAngDeg = 0.0f;          // góc chéo ước được (độ, > 0 = đang trôi xa về phía cần lái TRÁI)
+  void wallAngleReset() { _wHistN = 0; _wHistS = -1000.0f; _wallAngDeg = 0.0f; }
+  float wallAngleTerm(float sMm, float wallErr, uint8_t combo);  // PWM cản (D) theo góc chéo với tường
+  float slExtendMm = 55.0f;   // mm: encoder đủ mà VL53 trước còn thấy tường xa (<= frontStopMaxMm) thì đi tiếp tối đa chừng này (mode 6 đặt lớn để tường trước chốt lại độ dài ô)
+  float slPStartMm = 0;              // mm: vị trí đầu đoạn tính từ tâm ô trước (cho cửa sổ đọc vách hông)
+  bool slLegWall = false;
+  String slSideTrace;                // vết mẫu vách hông của đoạn dò vừa chạy: "p:L/R" (mm từ tâm ô trước : VL53 trái/phải)            // kết quả: có tường trước ở ô vừa tới
+  float slLegMm = 0; const char *slLegEnd = ""; int slLegFront = 0;   // kết quả đoạn thẳng vừa chạy: quãng encoder, kết thúc do (TUONG / TUONG+ / ENCODER...), VL53 trước
+  static float slalomAdvanceMm();            // mm xe tự tiến (= dịch ngang) trong 1 cua Slalom
+  long legTrimPulses = 0;                    // rút ngắn đoạn thẳng kế tiếp chừng này xung (dùng 1 lần)
+  bool slalomApproach = false;               // đoạn thẳng nối cua Slalom: không dừng theo tường trước
   void runCellToCellTest();        // test: 1 ô -> dừng -> trái 90 -> 1 ô -> dừng -> phải 90 -> 1 ô -> dừng
-  void runCornerNavTest();         // test: đi 1 ô -> cua trái (state machine) -> đi 1 ô -> dừng
   // Test calibration encoder: chạy thẳng 4 ô liên tục (seqCellPulses xung/ô), dừng rồi in ENC_L, ENC_R, AVG_TICKS, TICKS_PER_CELL
   void runCalibTest(uint8_t cells = 4);
   String calibReport;              // kết quả lần calib gần nhất (in lại khi cắm USB)
-  bool calibPrinted = true;            // MOVE 1 ô (không dừng) -> CORNER trái 90 -> MOVE 1 ô -> STOP
-  bool stepNoStop = false;         // true: đi hết quãng đường thì KHÔNG phanh/dừng, để chạy tiếp vào corner      // MOVE 1 ô -> TURN trái 90 -> MOVE -> TURN phải 90 -> MOVE -> TURN 180 -> MOVE -> STOP
+  bool calibPrinted = true;
+  bool frontGuard = false;          // mode 2: VL53 trước <= frontEmergencyMm (2 mẫu) thì phanh khẩn, không đâm tường
+  float frontEmergencyMm = 55.0f;
+  bool frontEmergency = false;      // đã phanh khẩn ở lần chạy vừa rồi
+  bool distUseMax = false;          // mode 2: quãng đường = bánh đi xa hơn (không lấy trung bình) -> 1 encoder mất xung không làm xe đi quá ô
+  bool stepNoStop = false;         // true: đi hết quãng đường thì KHÔNG phanh/dừng, chạy tiếp ô sau (chạy liên tục)
   bool turnLogPending() const { return _turnLogN > 0 && !_turnLogPrinted; }
   void logSample();
   void printLog();
@@ -349,8 +384,13 @@ private:
   float _rampFrom = 0.0f;
   unsigned long _rampT0 = 0;
   unsigned long _sideLastTL = 0, _sideLastTR = 0, _sideLastTF = 0;
+  unsigned long _sideTraceTL = 0;
+  int16_t _rMin = 9999, _rMax = 0; uint8_t _rN = 0;   // mode 5: min/max/số mẫu VL53 phải trong đoạn dò (độ phân tán)
+  uint8_t _openRunL = 0, _openRunR = 0;   // mode 5: số mẫu hông liên tiếp đọc >= SLALOM_EXPLORE_OPEN_MM
   bool _backCalibDone = false;     // đã calib gyro ở lần lùi kịch tường đầu tiên (sau khi bật nguồn)
   unsigned long _fsLastT = 0;
+  unsigned long _ctLastT = 0;
+  uint8_t _ctN = 0, _geN = 0;
   int16_t _fsD[8];                 // số đo VL53 trước (mm) của các mẫu gần liên tiếp
   long _fsP[8];                    // quãng đã đi (xung) lúc lấy từng mẫu
   uint8_t _fsN = 0;
@@ -367,13 +407,6 @@ private:
   bool initVL53(VL53L0X &sensor, uint8_t xshutPin, uint8_t address,
                 const char *name);
 
-  // Corner Controller nội bộ
-  float _cornerTarget = 0.0f;      // yaw đích cùng hệ góc tích lũy với MPU (không chuẩn hóa)
-  unsigned long _cornerT0 = 0, _cornerStateT = 0, _cornerPrevT = 0;
-  float _cornerPrevYaw = 0.0f, _cornerV0 = 0.0f;
-  bool startCorner(CornerState dir);
-  void finishCorner();
-  void cornerPwm(float err, float errPred, float outer, int &pl, int &pr) const;
 };
 
 extern RobotNav robotNav;

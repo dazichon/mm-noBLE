@@ -43,6 +43,8 @@ bool RobotNav::turnLeft90Test(float angle) {
   // Target KHÔNG chuẩn hóa: yaw của MPU là góc tích lũy (không quấn vòng) nên sai số = target - yaw luôn đúng chiều,
   // kể cả quay 180° (chuẩn hóa về [-180,180] sẽ làm xe quay ngược chiều khi target rơi sát ±180)
   float target = base + turnLeftYawSign * angle; // angle > 0: quay TRÁI, angle < 0: quay PHẢI
+  _absHeading += turnLeftYawSign * angle;          // hướng chuẩn tuyệt đối: cộng đúng góc lý tưởng
+  _yawFresh = false;
   _turnHeading = target;
   _turnHeadingValid = true;
   float prevYaw = mpu6050.getYaw();
@@ -129,109 +131,11 @@ void RobotNav::printTurnLog() {
   _turnLogPrinted = true;
 }
 
-// ================= MOTION PRIMITIVE: CORNER 90° (cua khi đang chạy) =================
-
-static void driveFwd(int l, int r) {
-  analogWrite(M1_IN1, constrain(l, 0, 255)); analogWrite(M1_IN2, 0);
-  analogWrite(M2_IN1, constrain(r, 0, 255)); analogWrite(M2_IN2, 0);
-}
-
-// PWM 2 bánh khi cua: bánh ngoài = outer, bánh trong giảm theo độ cong (0..1, tỉ lệ sai số trong vùng giảm tốc)
-void RobotNav::cornerPwm(float err, float errPred, float outer, int &pl, int &pr) const {
-  float u = constrain(fabsf(errPred) / cornerDecelZone, cornerMinCurve, 1.0f);
-  float inner = outer * (1.0f - (1.0f - cornerInnerRatio) * u);
-  bool goLeft = (turnLeftYawSign * err) > 0.0f;  // cần làm yaw đổi theo chiều quay TRÁI
-  pl = (int)lroundf((goLeft ? inner : outer) * motorScaleL);
-  pr = (int)lroundf((goLeft ? outer : inner) * motorScaleR);
-}
-
-// ================= CORNER CONTROLLER (state machine không chặn) =================
-
-bool RobotNav::startCornerLeft()  { return startCorner(CORNER_LEFT); }
-bool RobotNav::startCornerRight() { return startCorner(CORNER_RIGHT); }
-
-bool RobotNav::startCorner(CornerState dir) {
-  if (!mpuReady || cornerState != STRAIGHT) return false;
-  mpu6050.setAutoBias(false);
-  mpu6050.update();
-  cornerStartYaw = mpu6050.getYaw();
-  // Trái: yaw đổi theo turnLeftYawSign (mặc định -1 => startYaw - 90). Phải: ngược lại
-  float delta = (dir == CORNER_LEFT ? 1.0f : -1.0f) * turnLeftYawSign * 90.0f;
-  _cornerTarget = cornerStartYaw + delta;
-  cornerTargetYaw = wrap180(_cornerTarget);
-  _cornerV0 = (currentLeftSpeed + currentRightSpeed) * 0.5f; // tốc độ lúc vào cua, giảm dần về cornerSpeed
-  if (_cornerV0 < cornerSpeed) _cornerV0 = cornerSpeed;
-  _cornerT0 = _cornerStateT = _cornerPrevT = millis();
-  _cornerPrevYaw = cornerStartYaw;
-  cornerState = dir;
-  Serial.printf(">> [CORNERSM] START %s | yaw=%.2f target=%.2f\n",
-                dir == CORNER_LEFT ? "TRAI" : "PHAI", cornerStartYaw, cornerTargetYaw);
-  return true;
-}
-
-void RobotNav::updateCorner() {
-  if (cornerState == STRAIGHT) return;
-  if (!mpuReady) { finishCorner(); return; }
-  unsigned long nowT = millis();
-  float yaw = mpu6050.getYaw();
-  int pl, pr;
-
-  if (cornerState == EXIT_CORNER) {
-    // Hai bánh về lại tốc độ chạy thẳng, không còn lệch trái/phải
-    float t = cornerExitMs ? constrain((nowT - _cornerStateT) / (float)cornerExitMs, 0.0f, 1.0f) : 1.0f;
-    float v = cornerSpeed + ((float)baseForwardSpeed - cornerSpeed) * t;
-    pl = (int)lroundf(v * motorScaleL);
-    pr = (int)lroundf(v * motorScaleR);
-    driveFwd(pl, pr);
-    currentLeftSpeed = pl;
-    currentRightSpeed = pr;
-    if (t >= 1.0f) finishCorner();
-    return;
-  }
-
-  float err = wrap180(_cornerTarget - yaw);
-  float rate = (nowT > _cornerPrevT) ? wrap180(yaw - _cornerPrevYaw) * 1000.0f / (float)(nowT - _cornerPrevT) : 0.0f;
-  _cornerPrevYaw = yaw;
-  _cornerPrevT = nowT;
-  float errPred = err - rate * cornerLead;
-  bool timeout = nowT - _cornerT0 > cornerTimeoutMs;
-  if (fabsf(err) <= cornerTolerance || errPred * err <= 0.0f || timeout) {
-    Serial.printf(">> [CORNERSM] %s | yaw=%.2f target=%.2f err=%.2f -> EXIT\n",
-                  timeout ? "TIMEOUT" : "REACHED", yaw, cornerTargetYaw, err);
-    cornerState = EXIT_CORNER;
-    _cornerStateT = nowT;
-    return;
-  }
-
-  // Vào cua: bánh ngoài giảm tốc từ tốc độ lúc vào về cornerSpeed, rồi cua với độ cong theo sai số yaw
-  float t = cornerEntryMs ? constrain((nowT - _cornerT0) / (float)cornerEntryMs, 0.0f, 1.0f) : 1.0f;
-  float outer = _cornerV0 + (cornerSpeed - _cornerV0) * t;
-  cornerPwm(err, errPred, outer, pl, pr);
-  driveFwd(pl, pr);
-  currentLeftSpeed = pl;
-  currentRightSpeed = pr;
-}
-
-void RobotNav::finishCorner() {
-  cornerState = STRAIGHT;
-  // Giữ hướng mới cho đoạn thẳng kế tiếp, xóa trạng thái PID cũ để không giật
-  _targetYaw = _cornerTarget;
-  _turnHeading = _cornerTarget;
-  _turnHeadingValid = true;
-  long curL = getLeftEncoder(), curR = getRightEncoder();
-  _lastEncLeft = _startEncLeft = curL;   // enc PID tính chênh lệch từ đầu đoạn thẳng mới
-  _lastEncRight = _startEncRight = curR;
-  if (stepCellActive) { stepStartL = curL; stepStartR = curR; } // đoạn thẳng sau cua đếm quãng đường lại từ đầu
-  _lastPIDLoopTime = micros();
-  Serial.printf(">> [CORNERSM] STRAIGHT | yaw=%.2f heading=%.2f PWM %d/%d\n",
-                mpu6050.getYaw(), cornerTargetYaw, currentLeftSpeed, currentRightSpeed);
-}
-
 // ================= CALIB LẠI 1 Ô: lùi ngắn -> calib gyro về 0° -> tiến calibFwdPulses xung tới tâm ô =================
 // Dùng khi vào đường cụt, sau khi quay 180°: lùi calibRevMs (mặc định ~0.1s) cho lưng xe sát vách, đứng yên,
 // calib lại gyro và đặt yaw = 0, rồi tiến calibFwdPulses xung. Từ điểm dừng này coi như xe đang ở GIỮA Ô hiện tại;
 // quãng calibFwdPulses không tính vào quãng 1 ô kế tiếp (ô kế tiếp đếm lại từ 0).
-bool RobotNav::calibCellFromBackWall() {
+bool RobotNav::calibCellFromBackWall(bool noForward) {
   if (!mpuReady) { navPrintf(">> [CALIBCELL] MPU6050 chua san sang, huy" "\n"); return false; }
   stopPID();
   resetEnc();
@@ -275,20 +179,18 @@ bool RobotNav::calibCellFromBackWall() {
   long reversed = (labs(getLeftEncoder()) + labs(getRightEncoder())) / 2;
   navPrintf(">> [CALIBCELL] DA LUI %ld xung | yaw=%.2f -> calib gyro, giu xe dung yen\n", reversed, mpu6050.getYaw());
 
-  // Chỉ calib gyro ở lần lùi kịch tường ĐẦU TIÊN sau khi bật nguồn; các lần sau chỉ đặt yaw = 0 (tiết kiệm ~0.5s)
-  bool doCalib = !_backCalibDone;
-  // Chờ xe hết rung sau khi ép vào tường: calib cần đứng yên hẳn (150ms); chỉ đặt yaw = 0 thì 30ms cho hết nảy là đủ
+  // Gyro đã calib 1 lần lúc bật nguồn (RobotNav::init) -> ở đây CHỈ đặt yaw = 0, không calib lại (không đứng chờ)
+  const bool doCalib = false;
   unsigned long s = millis();
-  while (millis() - s < (doCalib ? 150UL : 30UL)) { mpu6050.update(); delay(2); }
-  if (doCalib) {
-    mpu6050.calibrate(120); // 120 mẫu (~0.45s) thay vì 300 (~1s): đủ chính xác khi xe đứng yên
-    _backCalibDone = true;
-  }
+  while (millis() - s < 30UL) { mpu6050.update(); delay(2); }  // 30ms cho hết nảy sau khi ép vào tường
   mpu6050.resetYaw();                                          // yaw = 0 là hướng mới
   _turnHeading = 0.0f;
+  _yawFresh = true;     // tới lần quay/cua kế tiếp: đoạn không tường giữ hướng bằng gyro
+  _absHeading = 0.0f;   // lùi kịch tường: xe vuông góc tường -> hướng chuẩn tuyệt đối về 0
   _turnHeadingValid = true;
   navPrintf(">> [CALIBCELL] %s, YAW = %.2f | tien %ld xung toi giua o\n", doCalib ? "GYRO CALIB XONG" : "RESET YAW (khong calib)",
             mpu6050.getYaw(), calibFwdPulses);
+  if (noForward) return true;  // speedrun: đoạn thẳng kế tiếp chạy luôn từ vách, cộng thêm calibFwdPulses -> không dừng ở tâm ô
 
   uint8_t savedCells = hold.cells;
   long savedPulses = pulsesPerCell;

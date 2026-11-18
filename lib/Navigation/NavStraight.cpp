@@ -1,6 +1,7 @@
 // ĐI THẲNG: startPID / stepCell / PID loop (Encoder + Gyro + Wall) / giữ ô + log chạy
 #include "RobotNav.h"
 #include "NavInternal.h"
+#include "MainParams.h"
 
 void RobotNav::startPID() {
   if (mpuReady) {
@@ -9,6 +10,7 @@ void RobotNav::startPID() {
     _targetYaw = mpu6050.getYaw();
   }
   _startEncLeft = getLeftEncoder();
+  _encOff = 0.0f;
   _startEncRight = getRightEncoder();
   _lastEncLeft = _startEncLeft;
   _lastEncRight = _startEncRight;
@@ -18,7 +20,20 @@ void RobotNav::startPID() {
   _rampT0 = millis();
   _yawIUs = 0;
   if (currentLeftSpeed == 0 && currentRightSpeed == 0) _yawI = 0.0f;  // xuất phát từ đứng yên: xoá I; đang chạy liên tục: giữ I
+  // Xuất phát từ đứng yên hoặc vừa lùi (PWM <= 0) -> bật pha launch dùng hệ số motor riêng
+  _launchActive = (currentLeftSpeed <= 0 && currentRightSpeed <= 0) && launchMm > 0.0f;
   pidRunActive = true;
+}
+
+// Pha launch: dùng launchScaleL/R thay motorScaleL/R, chuyển tuyến tính về motorScale khi đi hết launchMm. PID không đổi.
+void RobotNav::launchScale(float travL, float travR, float &sL, float &sR) {
+  sL = motorScaleL; sR = motorScaleR;
+  if (!_launchActive) return;
+  float mm = 0.5f * (travL + travR) * cellMm / (float)max(pulsesPerCell, 1L);
+  if (mm >= launchMm) { _launchActive = false; return; }
+  float k = 1.0f - mm / launchMm;   // 1 lúc đề -> 0 hết pha
+  sL += (launchScaleL - motorScaleL) * k;
+  sR += (launchScaleR - motorScaleR) * k;
 }
 
 void RobotNav::stopPID() {
@@ -48,6 +63,9 @@ void RobotNav::stepCell(int numCells) {
   _sideLastTF = _tF;
   _fsLastT = _tF;
   _fsN = 0;
+  _geN = 0;
+  stepTargetPulses = max(stepTargetPulses - legTrimPulses, (long)(pulsesPerCell / 20));  // mode 2 + Slalom: bớt quãng xe tự tiến trong cua
+  legTrimPulses = 0;
   _fsBaseTarget = stepTargetPulses;
   frontStopAdj = 0;
   frontLocked = false;
@@ -57,6 +75,22 @@ void RobotNav::stepCell(int numCells) {
   String msg = ">> [CELL] BAT DAU TIEN " + String(numCells) + " O (" +
                String(stepTargetPulses) + " xung)...";
   Serial.println(msg);
+}
+
+// Khâu D của bám tường khi không dùng gyro: góc chéo = atan(độ thay đổi sai lệch tường / quãng đường đi, trên ~50 mm).
+// combo = bên tường đang dùng (1 trái, 2 phải, 3 cả hai): đổi bên thì sai lệch nhảy bậc -> bắt đầu lại lịch sử.
+float RobotNav::wallAngleTerm(float sMm, float wallErr, uint8_t combo) {
+  if (combo == 0 || combo != _wCombo) { _wCombo = combo; wallAngleReset(); if (combo == 0) return 0.0f; }
+  if (sMm < _wHistS) wallAngleReset();  // đoạn mới (quãng đường đếm lại từ 0)
+  if (sMm - _wHistS >= 10.0f) {
+    for (int k = 5; k > 0; k--) _wHist[k] = _wHist[k - 1];
+    _wHist[0] = wallErr;
+    _wHistS = sMm;
+    if (_wHistN < 6) _wHistN++;
+  }
+  if (_wHistN < 6) return 0.0f;
+  _wallAngDeg = atanf((_wHist[0] - _wHist[5]) / 50.0f) * RAD_TO_DEG;
+  return wallKdPerDeg * _wallAngDeg;
 }
 
 void RobotNav::updatePIDLoop() {
@@ -108,7 +142,7 @@ void RobotNav::updatePIDLoop() {
     long curR = getRightEncoder();
     long distL = labs(curL - stepStartL);
     long distR = labs(curR - stepStartR);
-    long distTraveled = (distL + distR) / 2 + stepCarry;  // stepCarry: quãng vượt của ô trước khi chạy liên tục
+    long distTraveled = (distUseMax ? max(distL, distR) : (distL + distR) / 2) + stepCarry;  // stepCarry: quãng vượt của ô trước khi chạy liên tục
     stepTraveledPulses = distTraveled;
 
     // Đếm mẫu vách hông trong cửa sổ của ô cuối (-3 = ngoài tầm = thông; -1/-2 = lỗi, bỏ qua)
@@ -137,9 +171,20 @@ void RobotNav::updatePIDLoop() {
       else if ((_rawF >= 0 || _rawF == -3) && frontFarN < 255) frontFarN++;
     }
 
+    // Phanh khẩn như các mode khác (xem "Phanh dừng an toàn" ở trên): dF = VL53 trước đã lọc, <= frontEmergencyMm thì hãm + dừng
+    if (frontGuard && frontReady) {
+      uint16_t dFe = (uint16_t)smoothDF;
+      if (dFe > 20 && dFe <= (uint16_t)frontEmergencyMm) {
+        frontEmergency = true;
+        brakeMotors();
+        stopPID();
+        Serial.println(">> [PID] PHANH DUNG: GAP VAC TUONG TRUOC (" + String(dFe) + " mm)");
+        return;
+      }
+    }
     // Dừng theo tường trước (xem bộ lọc ở RobotNav.h). Chạy cả lúc chạy liên tục: thấy tường thật ở cuối ô này thì
     // bỏ chế độ không dừng -> giảm tốc bình thường và dừng khi VL53 trước = frontAlignMm
-    if (frontStopEnable && frontReady && frac >= 0.0f && _tF != _fsLastT) {
+    if (frontStopEnable && !slalomApproach && frontReady && frac >= 0.0f && _tF != _fsLastT) {
       _fsLastT = _tF;
       uint8_t need = constrain(frontStopSamples, (uint8_t)3, (uint8_t)8);
       if (_rawF > 20 && _rawF <= frontStopMaxMm) {
@@ -168,7 +213,7 @@ void RobotNav::updatePIDLoop() {
               stepTargetPulses = t;
               frontStopAdj = t - _fsBaseTarget;
               frontLocked = true;
-              stepNoStop = false;  // có tường ngay cuối ô: không chạy tiếp qua ô được, giảm tốc và dừng
+              stepNoStop = false;  // có tường ngay cuối ô: giảm tốc và dừng
             }
           }
         }
@@ -189,14 +234,14 @@ void RobotNav::updatePIDLoop() {
 
     if ((pulseReached || timeoutSafe) && stepNoStop) {
       _carryValid = pulseReached;  // ô sau đếm tiếp phần đã vượt (kể cả quãng chạy trong lúc chuyển ô)
-      // Hết quãng đường nhưng giữ nguyên PWM hiện tại để vào corner đang chạy (không phanh, không stopMotors)
+      // Hết quãng đường nhưng giữ nguyên PWM hiện tại để chạy tiếp ô sau (không phanh, không stopMotors)
       stepNoStop = false;
       stepCellActive = false;
       pidRunActive = false;
       holdRun = false;
       return;
     }
-    if (pulseReached || timeoutSafe) {
+    if ((pulseReached || timeoutSafe)) {
       bool quiet = holdRun; // chế độ test: dừng xong không in gì, log in riêng
       brakeMotors();
       stopPID();
@@ -221,6 +266,7 @@ void RobotNav::updatePIDLoop() {
   float pidOut = 0.0f;
   float yawCorr = 0.0f;
   float wallErr = 0.0f, wallCorr = 0.0f;
+  float scL = motorScaleL, scR = motorScaleR;
 
   {
     // ĐƯỜNG PID DUY NHẤT: Encoder P + giữ hướng gyro + Wall P (VL53 trái/phải)
@@ -228,8 +274,13 @@ void RobotNav::updatePIDLoop() {
     // (|L| - |R| > 0: bánh trái đi trước -> giảm bánh trái, tăng bánh phải). P trên vị trí nên không bị mất do làm tròn
     float travL = (float)labs(curL - _startEncLeft);
     float travR = (float)labs(curR - _startEncRight);
-    float encCorr = constrain(encKp * (travL - travR), -encMaxCorr, encMaxCorr);
+    const bool anyWallNow = hold.wallEnable &&
+        ((leftReady && _wFiltL > 20.0f && _wFiltL < hold.wallValidMax) || (rightReady && _wFiltR > 20.0f && _wFiltR < hold.wallValidMax));
+    float encCorr = 0.0f;
+    if (anyWallNow) _encOff = travL - travR;   // có tường: tường lái, encoder không kéo ngược
+    else encCorr = constrain(encKp * ((travL - travR) - _encOff), -encMaxCorr, encMaxCorr);
     pidOut = encCorr;
+    launchScale(travL, travR, scL, scR);   // hệ số motor: launch lúc đề, motorScale khi chạy
     _lastCorr = encCorr;
     // Wall: sai lệch ngang theo baseline từng bên, không dùng trực tiếp L-R.
     // eL = L - baseL > 0: xa tường trái hơn mức giữa (xe lệch phải); eR = R - baseR > 0: xa tường phải (xe lệch trái)
@@ -246,7 +297,7 @@ void RobotNav::updatePIDLoop() {
       else if (okR)   wallErr = -eR;
       wallErr = constrain(wallErr, -hold.wallErrClamp, hold.wallErrClamp);
     }
-    bool useGyro = mpuReady && hold.yawKp > 0.0f;
+    bool useGyro = straightUseGyro && mpuReady && hold.yawKp > 0.0f;
     // Wall -> DỊCH HƯỚNG ĐÍCH của gyro (độ) thay vì cộng PWM: gyro không còn chống lại việc lái về giữa ô,
     // xe đi chéo nhẹ vào tâm rồi thẳng lại. Không có gyro / wallYawGain = 0: cộng PWM như cũ.
     float wallYawOff = 0.0f;
@@ -255,7 +306,16 @@ void RobotNav::updatePIDLoop() {
       wallCorr = wallYawOff;  // log: độ dịch hướng
     } else if (hold.wallEnable) {
       wallCorr = constrain(hold.wallKp * wallErr, -hold.wallMaxCorr, hold.wallMaxCorr);
+      // Không gyro: thêm khâu D theo góc chéo với tường (thay vai trò giữ hướng của gyro), quãng đường tính từ encoder
+      if (!useGyro) {
+        bool okL = leftReady && _wFiltL > 20.0f && _wFiltL < hold.wallValidMax;
+        bool okR = rightReady && _wFiltR > 20.0f && _wFiltR < hold.wallValidMax;
+        float sMm = (float)stepTraveledPulses * cellMm / (float)pulsesPerCell;
+        wallCorr += wallAngleTerm(sMm, wallErr, (okL ? 1 : 0) | (okR ? 2 : 0));
+        wallCorr = constrain(wallCorr, -hold.wallMaxCorr, hold.wallMaxCorr);
+      }
       pidOut += wallCorr;
+      if (!useGyro && mpuReady) pidOut -= constrain(WALL_GYRO_DAMP * turnLeftYawSign * mpu6050.getGyroRate(), -WALL_GYRO_DAMP_MAX, WALL_GYRO_DAMP_MAX);   // hãm xoay bằng gyro
     }
     // Giữ hướng bằng gyro. Xe lệch PHẢI thì YAW TĂNG; pidOut > 0 => xe quay TRÁI, nên yawCorr = -Kp * yawError.
     // Quay trái làm yaw đổi theo turnLeftYawSign -> muốn lái trái wallYawOff độ thì đích = target + sign * off
@@ -296,8 +356,8 @@ void RobotNav::updatePIDLoop() {
   int leftSpeed = activeBaseSpeed - (int)lroundf(pidOut);
   int rightSpeed = activeBaseSpeed + (int)lroundf(pidOut);
 
-  leftSpeed = constrain((int)(leftSpeed * motorScaleL), 35, 255);
-  rightSpeed = constrain((int)(rightSpeed * motorScaleR), 35, 255);
+  leftSpeed = constrain((int)(leftSpeed * scL), 35, 255);
+  rightSpeed = constrain((int)(rightSpeed * scR), 35, 255);
 
   currentLeftSpeed = leftSpeed;
   currentRightSpeed = rightSpeed;
@@ -311,6 +371,7 @@ void RobotNav::updatePIDLoop() {
 // ================= GIỮ VỊ TRÍ TRONG Ô =================
 
 void RobotNav::startHold(bool keepLog) {
+  _encOff = 0.0f;
   // Chạy thẳng bằng đường PID duy nhất của updatePIDLoop: Encoder P + giữ hướng gyro + Wall P (VL53 trái/phải)
   stepCellActive = false;
   autoWallFollowActive = false;

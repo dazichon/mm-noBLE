@@ -2,45 +2,6 @@
 #include "RobotNav.h"
 #include "NavInternal.h"
 
-// Test: đi 1 ô (không dừng) -> cua trái 90° bằng state machine -> đi 1 ô -> dừng
-void RobotNav::runCornerNavTest() {
-  if (!mpuReady) { Serial.println(">> [CORNERNAV] MPU6050 chua san sang, huy"); return; }
-  stopPID();
-  unsigned long s = millis();
-  while (millis() - s < 200) { mpu6050.update(); delay(2); }
-
-  uint8_t savedCells = hold.cells;
-  long savedPulses = pulsesPerCell;
-  hold.cells = 1;
-  pulsesPerCell = seqCellPulses;
-  mpu6050.update();
-  _turnHeading = mpu6050.getYaw();
-  _turnHeadingValid = true;
-  clearLog();
-
-  auto move = [&](bool noStop) {
-    startHold(true);
-    _targetYaw = _turnHeading;
-    stepNoStop = noStop;
-    unsigned long t0 = millis();
-    while (pidRunActive && millis() - t0 < 15000) update();
-    if (pidRunActive) stopPID();
-    stepNoStop = false;
-  };
-
-  move(true);
-  if (startCornerLeft()) {
-    unsigned long t0 = millis();
-    while (cornerBusy() && millis() - t0 < 6000) update();
-  }
-  move(false);
-  stopMotors();
-  currentLeftSpeed = currentRightSpeed = 0;
-  hold.cells = savedCells;
-  pulsesPerCell = savedPulses;
-  Serial.println(">> [CORNERNAV] DONE - PWM = 0");
-}
-
 // ================= TEST CELL-TO-CELL: 1 ô -> dừng -> trái 90 -> 1 ô -> dừng -> phải 90 -> 1 ô -> dừng =================
 
 void RobotNav::runCellToCellTest() {

@@ -165,6 +165,8 @@ void MPU6050::update() {
         gyroZRate = 0.0f;
     }
 
+    _gyroRate = gyroZRate;
+
     // Tích phân vận tốc góc theo thời gian để ra góc Yaw
     _yaw += gyroZRate * dt;
 }

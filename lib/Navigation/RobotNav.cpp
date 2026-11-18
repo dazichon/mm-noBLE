@@ -163,7 +163,6 @@ void RobotNav::checkI2CFault() {
 void RobotNav::enterI2CFault(const char *why) {
   i2cFault = true;
   stopPID();  // dừng motor + huỷ chạy thẳng
-  cornerState = STRAIGHT;
   ffActive = false;
   // Ngừng đọc mọi cảm biến I2C: hết in lỗi liên tục, các vòng chạy thấy cảm biến không sẵn sàng thì thoát
   leftReady = frontReady = rightReady = false;
@@ -203,23 +202,36 @@ void RobotNav::saveForwardSpeed() {
   p.end();
 }
 
+// Bật ĐÚNG 1 cảm biến (các cảm biến khác đang shutdown), đợi ổn định, init, đặt địa chỉ riêng rồi mới trả về.
+// Thành công: chân XSHUT giữ HIGH (OUTPUT) suốt phiên chạy. Thất bại: đưa lại về shutdown (LOW) để cảm biến lỗi
+// (còn ở địa chỉ mặc định 0x29) không đụng cảm biến kế tiếp, và KHÔNG báo thành công.
 bool RobotNav::initVL53(VL53L0X &sensor, uint8_t xshutPin, uint8_t address,
                         const char *name) {
+  pinMode(xshutPin, OUTPUT);  // GPIO9 (BOOT) dùng làm OUTPUT được sau khi boot xong
+  digitalWrite(xshutPin, LOW);
+  delay(10);
   digitalWrite(xshutPin, HIGH);
   delay(50);
   sensor.setTimeout(50);
 
   if (!sensor.init()) {
-    Serial.print(name);
-    Serial.println(" VL53 FAIL");
+    Serial.printf("%s VL53 FAIL: init() that bai (XSHUT GPIO%u) -> giu cam bien o shutdown\n", name, xshutPin);
+    digitalWrite(xshutPin, LOW);
     return false;
   }
 
   sensor.setAddress(address);
+  // Kiểm tra cảm biến đã trả lời ở địa chỉ mới: thanh ghi model ID (0xC0) của VL53L0X = 0xEE
+  uint8_t id = sensor.readReg(0xC0);
+  if (sensor.last_status != 0 || id != 0xEE) {
+    Serial.printf("%s VL53 FAIL: khong tra loi o dia chi 0x%02X (model ID doc duoc = 0x%02X, I2C status %d)\n", name,
+                  address, id, sensor.last_status);
+    digitalWrite(xshutPin, LOW);
+    return false;
+  }
+
   sensor.startContinuous();
-  Serial.print(name);
-  Serial.print(" VL53 OK @ 0x");
-  Serial.println(address, HEX);
+  Serial.printf("%s VL53 OK @ 0x%02X (XSHUT GPIO%u = HIGH)\n", name, address, xshutPin);
   return true;
 }
 
@@ -256,12 +268,6 @@ void RobotNav::brakeMotors() {
 void RobotNav::update() {
   if (i2cFault) { stopMotors(); return; }
   updateSensors();
-
-  if (cornerState != STRAIGHT) {
-    if (mpuReady) mpu6050.update();
-    updateCorner();
-    return;
-  }
 
   if (ffActive) {
     stepFloodFill();

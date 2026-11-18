@@ -26,7 +26,6 @@ void RobotNav::startAutoWallFollow() {
 
 void RobotNav::stopAutoWallFollow() {
   autoWallFollowActive = false;
-  cornerState = STRAIGHT;
   stopPID();
   brakeMotors();
   lastAutoDecision = "ĐÃ DỪNG";

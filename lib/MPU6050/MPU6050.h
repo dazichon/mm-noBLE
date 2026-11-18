@@ -21,6 +21,7 @@ public:
     float getPitch() const;
     float getYaw() const;
     float getAngleZ() const { return getYaw(); }
+    float getGyroRate() const { return _gyroRate; } // độ/s, cùng chiều với yaw (đã trừ offset), cập nhật mỗi update()
     float getRelativeYaw() const;
     void setYawSetpoint();
     void resetYaw();
@@ -34,6 +35,7 @@ private:
     float _pitch;
     float _yaw;
     float _yawSetpoint;
+    float _gyroRate = 0.0f;
     bool _autoBias = true;
     bool _calibrated = false; // đã có offset tốt (lần calib đầu)
     float _stillTime;   // thời gian liên tục gần như đứng yên (s)
